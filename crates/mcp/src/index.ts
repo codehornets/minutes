@@ -81,21 +81,28 @@ function parseJsonOutput(stdout: string): any {
   }
 }
 
-function canonicalizePath(path: string): string {
+function canonicalizeFilePath(path: string): string {
   if (!existsSync(path)) {
     throw new Error(`Path does not exist: ${path}`);
   }
   return realpathSync(path);
 }
 
+function canonicalizeRoot(root: string): string {
+  // Roots may not exist yet (e.g. ~/.minutes/inbox on first run).
+  // Use realpath if it exists, otherwise lexical resolve.
+  return existsSync(root) ? realpathSync(root) : resolve(root);
+}
+
 function isWithinDirectory(candidate: string, root: string): boolean {
-  const rel = relative(root, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  // Ensure root ends with separator to prevent prefix attacks (e.g. ~/meetings-evil)
+  const rootWithSep = root.endsWith("/") ? root : root + "/";
+  return candidate === root || candidate.startsWith(rootWithSep);
 }
 
 function validatePathInDirectory(path: string, root: string, allowedExts: string[]): string {
-  const canonicalPath = canonicalizePath(path);
-  const canonicalRoot = canonicalizePath(root);
+  const canonicalPath = canonicalizeFilePath(path);
+  const canonicalRoot = canonicalizeRoot(root);
 
   if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
     throw new Error(
@@ -115,7 +122,7 @@ function validatePathInDirectories(
   roots: string[],
   allowedExts: string[]
 ): string {
-  const canonicalPath = canonicalizePath(path);
+  const canonicalPath = canonicalizeFilePath(path);
 
   if (!allowedExts.includes(extname(canonicalPath).toLowerCase())) {
     throw new Error(
@@ -123,7 +130,7 @@ function validatePathInDirectories(
     );
   }
 
-  const canonicalRoots = roots.map((root) => canonicalizePath(root));
+  const canonicalRoots = roots.map((root) => canonicalizeRoot(root));
   if (!canonicalRoots.some((root) => isWithinDirectory(canonicalPath, root))) {
     throw new Error(
       `Access denied: file must be inside one of ${canonicalRoots.join(", ")}`

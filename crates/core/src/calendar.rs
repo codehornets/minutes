@@ -35,7 +35,7 @@ pub fn upcoming_events(lookahead_minutes: u32) -> Vec<CalendarEvent> {
                         set t to summary of evt
                         set s to start date of evt
                         set mins to ((s - now) / 60) as integer
-                        set output to output & t & "|" & (s as string) & "|" & mins & linefeed
+                        set output to output & t & "␞" & (s as string) & "␞" & mins & linefeed
                     end repeat
                 end try
             end repeat
@@ -59,7 +59,7 @@ pub fn upcoming_events(lookahead_minutes: u32) -> Vec<CalendarEvent> {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            let parts: Vec<&str> = line.splitn(3, '␞').collect();
             if parts.len() >= 3 {
                 Some(CalendarEvent {
                     title: parts[0].trim().to_string(),
