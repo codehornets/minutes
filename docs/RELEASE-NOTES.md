@@ -20,19 +20,20 @@ That keeps every release aligned with
 The script accepts:
 
 ```bash
-scripts/release_notes.sh <from-ref> <to-ref> [channel]
+scripts/release_notes.sh <to-ref> [channel] [from-ref]
 ```
 
 Examples:
 
 ```bash
-scripts/release_notes.sh v0.1.0 HEAD stable
-scripts/release_notes.sh v0.2.0-beta.1 HEAD preview
-scripts/release_notes.sh v0.2.0 v0.2.1 stable
+scripts/release_notes.sh HEAD stable
+scripts/release_notes.sh v0.2.0-beta.2 preview
+scripts/release_notes.sh v0.2.1 stable v0.2.0
 ```
 
 The script:
 
+- selects a previous tag automatically when one is not provided
 - walks commits in the selected git range
 - groups them by surface based on touched paths
 - emits a markdown draft with stable sections
@@ -51,6 +52,16 @@ Current buckets:
 This is intentionally simple and auditable. If the repo adds a new
 distribution-relevant surface later, update the script rather than asking
 maintainers to remember it manually.
+
+## Channel-aware tag selection
+
+When the script auto-selects `from-ref`:
+
+- `stable` looks for the previous stable-style tag
+- `preview` looks for the previous preview-style tag
+
+This avoids generating a stable release note range from the most recent beta or
+rc tag once both channels are active.
 
 ## Workflow integration
 

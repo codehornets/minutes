@@ -1,22 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <from-ref> <to-ref> [channel]" >&2
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 <to-ref> [channel] [from-ref]" >&2
   exit 1
 fi
 
-from_ref="$1"
-to_ref="$2"
-channel="${3:-stable}"
+to_ref="$1"
+channel="${2:-stable}"
+from_ref="${3:-}"
 
-if ! git rev-parse --verify "${from_ref}^{commit}" >/dev/null 2>&1; then
-  echo "could not resolve from-ref: ${from_ref}" >&2
-  exit 1
-fi
+pick_previous_tag() {
+  local channel="$1"
+  local to_ref="$2"
+  local pattern
+
+  if [[ "$channel" == "preview" ]]; then
+    pattern='v*-*'
+  else
+    pattern='v[0-9]*'
+  fi
+
+  git tag --list "$pattern" --merged "$to_ref" --sort=-creatordate |
+    grep -Fxv "$(git describe --tags --exact-match "$to_ref" 2>/dev/null || true)" |
+    head -n 1
+}
 
 if ! git rev-parse --verify "${to_ref}^{commit}" >/dev/null 2>&1; then
   echo "could not resolve to-ref: ${to_ref}" >&2
+  exit 1
+fi
+
+if [[ -z "$from_ref" ]]; then
+  if from_ref="$(pick_previous_tag "$channel" "$to_ref")" && [[ -n "$from_ref" ]]; then
+    :
+  else
+    from_ref="$(git rev-list --max-parents=0 "$to_ref")"
+  fi
+fi
+
+if ! git rev-parse --verify "${from_ref}^{commit}" >/dev/null 2>&1; then
+  echo "could not resolve from-ref: ${from_ref}" >&2
   exit 1
 fi
 
