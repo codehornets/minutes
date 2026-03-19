@@ -160,6 +160,18 @@ fn should_discard_hotkey_capture(started_at: Option<Instant>, now: Instant) -> b
         .unwrap_or(false)
 }
 
+fn reset_hotkey_capture_state(
+    runtime: Option<&Arc<Mutex<HotkeyRuntime>>>,
+    discard_short_hotkey_capture: Option<&Arc<AtomicBool>>,
+) {
+    if let Some(flag) = discard_short_hotkey_capture {
+        flag.store(false, Ordering::Relaxed);
+    }
+    if let Some(runtime) = runtime {
+        clear_hotkey_runtime(runtime);
+    }
+}
+
 fn preserve_failed_capture(wav_path: &std::path::Path, config: &Config) -> Option<PathBuf> {
     let metadata = wav_path.metadata().ok()?;
     if metadata.len() == 0 {
@@ -771,6 +783,10 @@ pub fn start_recording(
     if let Err(e) = minutes_core::pid::create() {
         eprintln!("Failed to create PID: {}", e);
         recording.store(false, Ordering::Relaxed);
+        reset_hotkey_capture_state(
+            hotkey_runtime.as_ref(),
+            discard_short_hotkey_capture.as_ref(),
+        );
         return;
     }
     minutes_core::pid::write_recording_metadata(mode).ok();
@@ -911,9 +927,10 @@ pub fn start_recording(
     minutes_core::pid::clear_processing_status().ok();
     minutes_core::pid::clear_recording_metadata().ok();
     recording.store(false, Ordering::Relaxed);
-    if let Some(runtime) = hotkey_runtime {
-        clear_hotkey_runtime(&runtime);
-    }
+    reset_hotkey_capture_state(
+        hotkey_runtime.as_ref(),
+        discard_short_hotkey_capture.as_ref(),
+    );
 }
 
 fn spawn_hotkey_recording(app: &tauri::AppHandle, style: HotkeyCaptureStyle) {
@@ -1627,6 +1644,27 @@ mod tests {
             Some(started),
             Instant::now()
         ));
+    }
+
+    #[test]
+    fn reset_hotkey_capture_state_clears_runtime_and_discard_flag() {
+        let runtime = Arc::new(Mutex::new(HotkeyRuntime {
+            key_down: true,
+            key_down_started_at: Some(Instant::now()),
+            active_capture: Some(HotkeyCaptureStyle::Locked),
+            recording_started_at: Some(Instant::now()),
+            hold_generation: 9,
+        }));
+        let discard = Arc::new(AtomicBool::new(true));
+
+        reset_hotkey_capture_state(Some(&runtime), Some(&discard));
+
+        let current = runtime.lock().unwrap();
+        assert!(!current.key_down);
+        assert!(current.key_down_started_at.is_none());
+        assert!(current.active_capture.is_none());
+        assert!(current.recording_started_at.is_none());
+        assert!(!discard.load(Ordering::Relaxed));
     }
 
     #[test]
