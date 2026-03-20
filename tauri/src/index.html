@@ -2886,6 +2886,21 @@
       try {
         const s = await invoke('cmd_get_settings');
         document.getElementById('settings-config-path').textContent = s.config_path;
+        // General: sync with existing app state
+        setSettingsToggle('settings-notifications', notifyOnCompletion);
+        setSettingsToggle('settings-cues', typeof cuesEnabled !== 'undefined' ? cuesEnabled : true);
+        setSettingsToggle('settings-hotkey', hotkeyEnabled);
+        // Populate hotkey shortcut dropdown from existing choices
+        const hkSettings = await invoke('cmd_global_hotkey_settings').catch(() => null);
+        const settingsHkSelect = document.getElementById('settings-hotkey-shortcut');
+        settingsHkSelect.replaceChildren();
+        if (hkSettings && hkSettings.choices) {
+          for (const choice of hkSettings.choices) {
+            const o = document.createElement('option'); o.value = choice.value; o.textContent = choice.label; settingsHkSelect.appendChild(o);
+          }
+          settingsHkSelect.value = hotkeyShortcut || hkSettings.shortcut || '';
+        }
+        document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
         document.getElementById('settings-whisper-model').value = s.transcription.model;
         const dl = s.transcription.downloaded_models || [];
         const selectedModel = s.transcription.model;
@@ -2939,6 +2954,30 @@
           'Meetings: '+f(st.meetings.bytes)+' ('+st.meetings.count+' files)  •  Memos: '+f(st.memos.bytes)+' ('+st.memos.count+')  •  Models: '+f(st.models.bytes)+'  •  Screenshots: '+f(st.screens.bytes)+'  •  Total: '+f(st.total_bytes);
       } catch(e) { document.getElementById('settings-storage-info').textContent = 'Could not load.'; }
     }
+    // Settings General handlers — delegate to existing app logic
+    document.getElementById('settings-notifications').addEventListener('click', async () => {
+      const next = !notifyOnCompletion;
+      try { await invoke('cmd_set_completion_notifications', { enabled: next }); setNotificationToggle(next); setSettingsToggle('settings-notifications', next); } catch(e) { console.error(e); }
+    });
+    document.getElementById('settings-cues').addEventListener('click', () => {
+      cuesEnabled = !cuesEnabled;
+      localStorage.setItem('minutes.cuesEnabled', cuesEnabled);
+      setCueToggle(cuesEnabled);
+      setSettingsToggle('settings-cues', cuesEnabled);
+    });
+    document.getElementById('settings-hotkey').addEventListener('click', async () => {
+      const shortcut = document.getElementById('settings-hotkey-shortcut').value || hotkeyShortcut;
+      await syncHotkey(!hotkeyEnabled, shortcut);
+      setSettingsToggle('settings-hotkey', hotkeyEnabled);
+      document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
+    });
+    document.getElementById('settings-hotkey-shortcut').addEventListener('change', async () => {
+      const shortcut = document.getElementById('settings-hotkey-shortcut').value;
+      await syncHotkey(hotkeyEnabled, shortcut);
+      setSettingsToggle('settings-hotkey', hotkeyEnabled);
+      document.getElementById('settings-hotkey-status').textContent = hotkeyEnabled ? 'Active' : 'Off';
+    });
+
     // Settings change handlers
     document.getElementById('settings-whisper-model').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', {section:'transcription',key:'model',value:e.target.value});
