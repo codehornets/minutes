@@ -26,6 +26,7 @@ cargo run --bin minutes -- stop      # Stop and process
 
 ```bash
 ./scripts/build.sh                   # Builds everything and installs CLI
+./scripts/build.sh --install         # Same + copies .app to /Applications
 # Or manually:
 export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
 cargo build --release -p minutes-cli           # CLI binary
@@ -37,7 +38,7 @@ open target/release/bundle/macos/Minutes.app   # Launch app
 **IMPORTANT**: After any code change, you must rebuild BOTH the CLI and the Tauri app:
 - CLI changes: `cargo build --release -p minutes-cli && cp target/release/minutes ~/.local/bin/minutes`
 - Tauri changes: `cargo tauri build --bundles app` then relaunch Minutes.app
-- Both: `./scripts/build.sh`
+- Both: `./scripts/build.sh` (add `--install` to copy .app to /Applications)
 
 ## Project Structure
 
