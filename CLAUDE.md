@@ -118,16 +118,18 @@ node test/mcp_tools_test.mjs                        # 8 MCP integration tests
 
 ## Test Coverage
 
-73 tests total:
+77 tests total:
 - 57 unit tests (all core modules)
 - 8 integration tests (pipeline, permissions, collisions, search filters)
 - 2 real whisper tests (transcription + no-speech detection with tiny model)
 - 8 MCP integration tests (CLI JSON output, TypeScript compilation)
+- 4 hook unit tests (post-record hook: routing, edge cases, error handling)
 
 ## Claude Ecosystem Integration
 
 - **MCP Server**: 8 tools for Claude Desktop / Cowork / Dispatch
-- **Claude Code Plugin**: 8 skills + meeting-analyst agent + PostToolUse hook
+- **Claude Code Plugin**: 11 skills (8 core + 3 interactive lifecycle) + meeting-analyst agent + PostToolUse hook
+- **Interactive meeting lifecycle**: `/minutes prep` → record → `/minutes debrief` → `/minutes weekly` with skill chaining via `.prep.md` files
 - **Conversational summarization**: Claude reads transcripts via MCP, no API key needed
-- **Auto-tagging**: PostToolUse hook adds git repo name to meeting frontmatter
+- **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items
 - **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces

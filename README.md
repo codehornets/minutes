@@ -217,10 +217,26 @@ No `ANTHROPIC_API_KEY`. No extra cost. Just your Claude subscription doing what 
 ### Claude Code (Plugin)
 ```
 .claude/plugins/minutes/
-├── 8 skills: /minutes record, search, list, recap, note, verify, setup, cleanup
+├── 11 skills:
+│   ├── Core: /minutes record, search, list, note, verify, setup, cleanup
+│   └── Interactive: /minutes prep, debrief, recap, weekly
 ├── 1 agent: meeting-analyst (cross-meeting intelligence)
-└── 1 hook: auto-tags meetings with current git repo
+└── 1 hook: post-recording alerts (project tagging + decision conflicts + overdue items)
 ```
+
+**Meeting lifecycle skills** — inspired by [gstack](https://github.com/garrytan/gstack)'s interactive skill pattern:
+
+```
+/minutes prep "call with Alex"     → relationship brief, talking points, .prep.md saved
+  ↓
+minutes record → minutes stop       → hook alerts if decisions conflict with prior meetings
+  ↓
+/minutes debrief                    → "You wanted to resolve pricing. Did you?"
+  ↓
+/minutes weekly                     → themes, decision arcs, stale items, Monday brief
+```
+
+Each interactive skill pushes back on vague input, produces actionable intelligence, and ends with a three-beat closing ritual (signal reflection, concrete assignment, next-skill nudge).
 
 ### Minutes Desktop Assistant
 
@@ -296,7 +312,7 @@ minutes/
 ├── crates/cli/     CLI binary — 12 commands
 ├── crates/mcp/     MCP server — 8 tools for Claude Desktop
 ├── tauri/          Menu bar app — system tray, recording UI, singleton AI Assistant
-└── .claude/plugins/minutes/   Claude Code plugin — 8 skills + 1 agent + 1 hook
+└── .claude/plugins/minutes/   Claude Code plugin — 11 skills + 1 agent + 1 hook
 ```
 
 Single `minutes-core` library shared by CLI, MCP server, and Tauri app. Zero code duplication.
