@@ -364,6 +364,7 @@ fn main() {
         std::process::exit(code);
     }
 
+    let startup_config_snapshot = minutes_core::config::Config::load();
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -374,6 +375,10 @@ fn main() {
     let global_hotkey_enabled = Arc::new(AtomicBool::new(false));
     let global_hotkey_shortcut =
         Arc::new(Mutex::new(commands::default_hotkey_shortcut().to_string()));
+    let dictation_shortcut_enabled = Arc::new(AtomicBool::new(false));
+    let dictation_shortcut = Arc::new(Mutex::new(
+        startup_config_snapshot.dictation.shortcut.clone(),
+    ));
     let hotkey_runtime = Arc::new(Mutex::new(commands::HotkeyRuntime::default()));
     let discard_short_hotkey_capture = Arc::new(AtomicBool::new(false));
     let screen_share_hidden = Arc::new(AtomicBool::new(true));
@@ -385,8 +390,26 @@ fn main() {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    commands::handle_global_hotkey_event(app, event.state());
+                .with_handler(|app, shortcut, event| {
+                    let shortcut_id = shortcut.id();
+                    let state = app.state::<commands::AppState>();
+                    let dictation_shortcut_value = state
+                        .dictation_shortcut
+                        .lock()
+                        .ok()
+                        .map(|value| value.clone())
+                        .unwrap_or_else(|| commands::default_dictation_shortcut().to_string());
+                    let dictation_shortcut_id =
+                        <tauri_plugin_global_shortcut::Shortcut as std::str::FromStr>::from_str(
+                            dictation_shortcut_value.as_str(),
+                        )
+                        .ok()
+                        .map(|shortcut| shortcut.id());
+                    if Some(shortcut_id) == dictation_shortcut_id {
+                        commands::handle_dictation_shortcut_event(app, event.state());
+                    } else {
+                        commands::handle_global_hotkey_event(app, event.state());
+                    }
                 })
                 .build(),
         )
@@ -402,6 +425,8 @@ fn main() {
             completion_notifications_enabled: completion_notifications_enabled.clone(),
             global_hotkey_enabled: global_hotkey_enabled.clone(),
             global_hotkey_shortcut: global_hotkey_shortcut.clone(),
+            dictation_shortcut_enabled: dictation_shortcut_enabled.clone(),
+            dictation_shortcut: dictation_shortcut.clone(),
             hotkey_runtime: hotkey_runtime.clone(),
             discard_short_hotkey_capture: discard_short_hotkey_capture.clone(),
             pty_manager: Arc::new(Mutex::new(pty::PtyManager::default())),
@@ -422,13 +447,69 @@ fn main() {
             if startup_config.dictation.hotkey_enabled {
                 let app_handle = app.handle().clone();
                 let keycode = startup_config.dictation.hotkey_keycode;
+                minutes_core::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "info",
+                    "step": "dictation_hotkey_startup_restore",
+                    "file": "",
+                    "extra": {
+                        "enabled": true,
+                        "keycode": keycode,
+                    }
+                }))
+                .ok();
                 std::thread::spawn(move || {
                     if let Err(error) =
                         commands::start_dictation_hotkey_with_keycode(app_handle, keycode)
                     {
                         eprintln!("[dictation-hotkey] startup restore failed: {}", error);
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "error",
+                            "step": "dictation_hotkey_startup_restore",
+                            "file": "",
+                            "error": error,
+                        }))
+                        .ok();
                     }
                 });
+            }
+
+            if startup_config.dictation.shortcut_enabled {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+                let shortcut = startup_config.dictation.shortcut.clone();
+                if let Err(error) = app.global_shortcut().register(shortcut.as_str()) {
+                    eprintln!("[dictation-shortcut] startup restore failed: {}", error);
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "error",
+                        "step": "dictation_shortcut_startup_restore",
+                        "file": "",
+                        "error": error.to_string(),
+                        "extra": {
+                            "enabled": true,
+                            "shortcut": shortcut,
+                        }
+                    }))
+                    .ok();
+                } else {
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "info",
+                        "step": "dictation_shortcut_startup_restore",
+                        "file": "",
+                        "extra": {
+                            "enabled": true,
+                            "shortcut": shortcut.clone(),
+                        }
+                    }))
+                    .ok();
+                    dictation_shortcut_enabled.store(true, Ordering::Relaxed);
+                    if let Ok(mut current) = dictation_shortcut.lock() {
+                        *current = shortcut;
+                    }
+                }
             }
 
             // Calendar state for dynamic tray menu items
@@ -839,6 +920,8 @@ fn main() {
             commands::cmd_set_completion_notifications,
             commands::cmd_global_hotkey_settings,
             commands::cmd_set_global_hotkey,
+            commands::cmd_dictation_shortcut_settings,
+            commands::cmd_set_dictation_shortcut,
             commands::cmd_desktop_capabilities,
             commands::cmd_permission_center,
             commands::cmd_recovery_items,

@@ -57,6 +57,21 @@ That script:
 - runs the native hotkey diagnostic from the installed app identity
 - launches `Minutes Dev.app`
 
+## Dictation shortcut paths
+
+Minutes now has two distinct dictation shortcut paths:
+
+- `Standard shortcut (recommended)`
+  - uses the normal global shortcut system
+  - default choice: `Cmd/Ctrl + Shift + D`
+  - should be the primary path we validate and ship
+- `Raw key hotkey (advanced)`
+  - uses low-level macOS keyboard monitoring
+  - intended for keys like `Caps Lock` and `fn`
+  - requires the more fragile permission-heavy path and remains advanced/experimental
+
+When validating dictation for normal users, prefer the standard shortcut path first.
+
 ### Signing modes
 
 For open-source contributors, the script supports two modes:

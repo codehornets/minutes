@@ -82,6 +82,12 @@ Native hotkey sanity check:
 
 See [docs/DESKTOP-DEVELOPMENT.md](/Users/silverbook/Sites/minutes/docs/DESKTOP-DEVELOPMENT.md) for the full workflow.
 
+For dictation shortcut work:
+
+- prioritize the `Standard shortcut (recommended)` path first
+- treat the raw-key `Caps Lock` / `fn` path as advanced and permission-heavy
+- do not call the raw-key path “done” just because the monitor is active; require visible feedback or logged event delivery
+
 ### Open-source contributor note
 
 This repo is public, so local scripts must not assume the maintainer's Apple

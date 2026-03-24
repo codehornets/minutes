@@ -381,6 +381,11 @@
       display: none;
     }
 
+    .header-chip.dictation-shortcut {
+      background: rgba(91, 143, 217, 0.10);
+      color: var(--accent);
+    }
+
     .status-pill {
       font-size: 0;
       font-weight: 600;
@@ -1514,6 +1519,7 @@
     </div>
     <div class="header-actions">
       <button class="btn btn-icon" id="btn-settings" title="Settings (⌘,)">⚙</button>
+      <button class="header-chip dictation-shortcut" id="dictation-shortcut-chip">Dictate</button>
       <button class="header-chip readiness" id="btn-readiness">Readiness</button>
       <button class="header-chip" id="btn-recovery">Recovery <span id="recovery-count">0</span></button>
       <span class="status-pill" id="status-pill">idle</span>
@@ -1789,11 +1795,19 @@
         <div class="about-item-title">DICTATION</div>
         <div class="about-controls">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Dictation hotkey</div>
+            <div class="about-controls-copy">Standard shortcut (recommended)</div>
+            <select class="shortcut-select" id="settings-dictation-shortcut-select" style="margin-top: 6px;"></select>
+            <div class="about-controls-meta" id="settings-dictation-shortcut-status">Uses the standard global shortcut system. Recommended for most users.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-shortcut">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Raw key hotkey (advanced)</div>
             <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
               <button id="settings-dictation-hotkey-record" class="btn btn-secondary btn-sm" style="min-width: 100px; font-family: var(--font-mono); font-size: 12px;">Caps Lock</button>
             </div>
-            <div class="about-controls-meta" id="settings-dictation-hotkey-status">Hold the selected key to dictate, or tap to lock and tap again to stop. Requires Input Monitoring permission.</div>
+            <div class="about-controls-meta" id="settings-dictation-hotkey-status">Advanced mode. Hold the selected key to dictate, or tap to lock and tap again to stop. Requires Input Monitoring permission.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-hotkey">Off</button>
         </div>
@@ -2094,6 +2108,7 @@
     const readinessOverlay = document.getElementById('readiness-overlay');
     const readinessButton = document.getElementById('btn-readiness');
     const readinessScroll = document.getElementById('readiness-scroll');
+    const dictationShortcutChip = document.getElementById('dictation-shortcut-chip');
     const recoveryOverlay = document.getElementById('recovery-overlay');
     const recoveryButton = document.getElementById('btn-recovery');
     const recoveryCount = document.getElementById('recovery-count');
@@ -2116,6 +2131,8 @@
     let playCaptureCues = true;
     let hotkeyEnabled = false;
     let hotkeyShortcut = 'CmdOrCtrl+Shift+M';
+    let dictationShortcutActive = false;
+    let dictationShortcutLabel = 'Dictate';
     let lastOutputKey = null;
     let pollInterval = null;
     let desktopCapabilities = {
@@ -2134,6 +2151,16 @@
       complete: new Audio('audio/cue-complete.wav'),
       error: new Audio('audio/cue-error.wav'),
     };
+
+    function renderDictationShortcutChip() {
+      if (!dictationShortcutChip) return;
+      if (dictationShortcutActive) {
+        dictationShortcutChip.classList.add('active');
+        dictationShortcutChip.textContent = dictationShortcutLabel;
+      } else {
+        dictationShortcutChip.classList.remove('active');
+      }
+    }
 
     // Create visualizer bars
     for (let i = 0; i < NUM_BARS; i++) {
@@ -3194,6 +3221,44 @@
             hotkeyRecordBtn.textContent = keyName;
           }
         }
+        const dictationShortcutSettings = await invoke('cmd_dictation_shortcut_settings').catch(() => null);
+        const dictationShortcutSelect = document.getElementById('settings-dictation-shortcut-select');
+        dictationShortcutSelect.replaceChildren();
+        if (dictationShortcutSettings && dictationShortcutSettings.choices) {
+          for (const choice of dictationShortcutSettings.choices) {
+            const o = document.createElement('option');
+            o.value = choice.value;
+            o.textContent = choice.label;
+            dictationShortcutSelect.appendChild(o);
+          }
+          dictationShortcutSelect.value = s.dictation?.shortcut || dictationShortcutSettings.shortcut || '';
+          setSettingsToggle('settings-dictation-shortcut', Boolean(dictationShortcutSettings.enabled));
+          dictationShortcutActive = Boolean(dictationShortcutSettings.enabled);
+          dictationShortcutLabel = dictationShortcutSettings.enabled
+            ? `Dictate ${dictationShortcutSettings.shortcut}`
+            : 'Dictate';
+          renderDictationShortcutChip();
+          document.getElementById('settings-dictation-shortcut-status').textContent =
+            dictationShortcutSettings.enabled
+              ? `Active - ${dictationShortcutSettings.shortcut}`
+              : 'Uses the standard global shortcut system. Recommended for most users.';
+          if (s.dictation?.shortcut_enabled && !dictationShortcutSettings.enabled) {
+            const restored = await invoke('cmd_set_dictation_shortcut', {
+              enabled: true,
+              shortcut: s.dictation?.shortcut || dictationShortcutSettings.shortcut,
+            }).catch(() => null);
+            if (restored) {
+              setSettingsToggle('settings-dictation-shortcut', restored.enabled);
+              dictationShortcutActive = Boolean(restored.enabled);
+              dictationShortcutLabel = restored.enabled ? `Dictate ${restored.shortcut}` : 'Dictate';
+              renderDictationShortcutChip();
+              document.getElementById('settings-dictation-shortcut-status').textContent =
+                restored.enabled
+                  ? `Active - ${restored.shortcut}`
+                  : 'Uses the standard global shortcut system. Recommended for most users.';
+            }
+          }
+        }
         const nativeDictationHotkey = await invoke('cmd_dictation_hotkey_status').catch(() => null);
         if (nativeDictationHotkey) {
           applyDictationHotkeyStatus(nativeDictationHotkey);
@@ -3371,6 +3436,48 @@
     document.getElementById('settings-agent').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'assistant',key:'agent',value:e.target.value}));
 
     // Dictation settings handlers
+    document.getElementById('settings-dictation-shortcut').addEventListener('click', async () => {
+      const select = document.getElementById('settings-dictation-shortcut-select');
+      const currentEnabled = document.getElementById('settings-dictation-shortcut').textContent === 'On';
+      try {
+        const settings = await invoke('cmd_set_dictation_shortcut', {
+          enabled: !currentEnabled,
+          shortcut: select.value,
+        });
+        setSettingsToggle('settings-dictation-shortcut', settings.enabled);
+        dictationShortcutActive = Boolean(settings.enabled);
+        dictationShortcutLabel = settings.enabled ? `Dictate ${settings.shortcut}` : 'Dictate';
+        renderDictationShortcutChip();
+        document.getElementById('settings-dictation-shortcut-status').textContent =
+          settings.enabled
+            ? `Active - ${settings.shortcut}`
+            : 'Uses the standard global shortcut system. Recommended for most users.';
+      } catch (e) {
+        document.getElementById('settings-dictation-shortcut-status').textContent = String(e);
+      }
+    });
+    document.getElementById('settings-dictation-shortcut-select').addEventListener('change', async (e) => {
+      const button = document.getElementById('settings-dictation-shortcut');
+      const enabled = button.textContent === 'On';
+      if (!enabled) {
+        await invoke('cmd_set_setting', {section:'dictation',key:'shortcut',value:e.target.value});
+        document.getElementById('settings-dictation-shortcut-status').textContent = `${e.target.value} saved. Toggle the standard shortcut on when you're ready to use it.`;
+        return;
+      }
+      try {
+        const settings = await invoke('cmd_set_dictation_shortcut', {
+          enabled: true,
+          shortcut: e.target.value,
+        });
+        setSettingsToggle('settings-dictation-shortcut', settings.enabled);
+        dictationShortcutActive = Boolean(settings.enabled);
+        dictationShortcutLabel = settings.enabled ? `Dictate ${settings.shortcut}` : 'Dictate';
+        renderDictationShortcutChip();
+        document.getElementById('settings-dictation-shortcut-status').textContent = `Active - ${settings.shortcut}`;
+      } catch (e2) {
+        document.getElementById('settings-dictation-shortcut-status').textContent = String(e2);
+      }
+    });
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'dictation',key:'model',value:e.target.value}));
     document.getElementById('settings-dictation-silence').addEventListener('change', (e) => invoke('cmd_set_setting', {section:'dictation',key:'silence_timeout_ms',value:e.target.value}));
     document.getElementById('settings-dictation-daily-note').addEventListener('click', async () => {

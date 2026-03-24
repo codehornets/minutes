@@ -24,6 +24,8 @@ pub struct AppState {
     pub pty_manager: Arc<Mutex<crate::pty::PtyManager>>,
     pub dictation_active: Arc<AtomicBool>,
     pub dictation_stop_flag: Arc<AtomicBool>,
+    pub dictation_shortcut_enabled: Arc<AtomicBool>,
+    pub dictation_shortcut: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -120,6 +122,11 @@ const HOTKEY_CHOICES: [(&str, &str); 3] = [
     ("CmdOrCtrl+Shift+J", "Cmd/Ctrl + Shift + J"),
     ("CmdOrCtrl+Shift+T", "Cmd/Ctrl + Shift + T"),
 ];
+const DICTATION_SHORTCUT_CHOICES: [(&str, &str); 3] = [
+    ("CmdOrCtrl+Shift+Space", "Cmd/Ctrl + Shift + Space"),
+    ("CmdOrCtrl+Alt+Space", "Cmd/Ctrl + Option/Alt + Space"),
+    ("CmdOrCtrl+Shift+D", "Cmd/Ctrl + Shift + D"),
+];
 const HOTKEY_HOLD_THRESHOLD_MS: u64 = 300;
 const HOTKEY_MIN_DURATION_MS: u64 = 400;
 
@@ -165,8 +172,12 @@ pub fn default_hotkey_shortcut() -> &'static str {
     HOTKEY_CHOICES[0].0
 }
 
-fn hotkey_choices() -> Vec<HotkeyChoice> {
-    HOTKEY_CHOICES
+pub fn default_dictation_shortcut() -> &'static str {
+    DICTATION_SHORTCUT_CHOICES[0].0
+}
+
+fn shortcut_choices(choices: &[(&str, &str)]) -> Vec<HotkeyChoice> {
+    choices
         .iter()
         .map(|(value, label)| HotkeyChoice {
             value: (*value).to_string(),
@@ -175,21 +186,37 @@ fn hotkey_choices() -> Vec<HotkeyChoice> {
         .collect()
 }
 
-fn validate_hotkey_shortcut(shortcut: &str) -> Result<String, String> {
-    HOTKEY_CHOICES
+fn hotkey_choices() -> Vec<HotkeyChoice> {
+    shortcut_choices(&HOTKEY_CHOICES)
+}
+
+fn dictation_shortcut_choices() -> Vec<HotkeyChoice> {
+    shortcut_choices(&DICTATION_SHORTCUT_CHOICES)
+}
+
+fn validate_shortcut(shortcut: &str, choices: &[(&str, &str)]) -> Result<String, String> {
+    choices
         .iter()
         .find_map(|(value, _)| (*value == shortcut).then(|| (*value).to_string()))
         .ok_or_else(|| {
             format!(
                 "Unsupported shortcut: {}. Choose one of: {}",
                 shortcut,
-                HOTKEY_CHOICES
+                choices
                     .iter()
                     .map(|(_, label)| *label)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         })
+}
+
+fn validate_hotkey_shortcut(shortcut: &str) -> Result<String, String> {
+    validate_shortcut(shortcut, &HOTKEY_CHOICES)
+}
+
+fn validate_dictation_shortcut(shortcut: &str) -> Result<String, String> {
+    validate_shortcut(shortcut, &DICTATION_SHORTCUT_CHOICES)
 }
 
 fn current_hotkey_settings(state: &AppState) -> HotkeySettings {
@@ -203,6 +230,20 @@ fn current_hotkey_settings(state: &AppState) -> HotkeySettings {
         enabled: state.global_hotkey_enabled.load(Ordering::Relaxed),
         shortcut,
         choices: hotkey_choices(),
+    }
+}
+
+fn current_dictation_shortcut_settings(state: &AppState) -> HotkeySettings {
+    let shortcut = state
+        .dictation_shortcut
+        .lock()
+        .ok()
+        .map(|value| value.clone())
+        .unwrap_or_else(|| default_dictation_shortcut().to_string());
+    HotkeySettings {
+        enabled: state.dictation_shortcut_enabled.load(Ordering::Relaxed),
+        shortcut,
+        choices: dictation_shortcut_choices(),
     }
 }
 
@@ -1417,6 +1458,82 @@ pub fn handle_global_hotkey_event(
     }
 }
 
+pub fn handle_dictation_shortcut_event(
+    app: &tauri::AppHandle,
+    shortcut_state: tauri_plugin_global_shortcut::ShortcutState,
+) {
+    let state = app.state::<AppState>();
+    if !state.dictation_shortcut_enabled.load(Ordering::Relaxed) {
+        return;
+    }
+
+    if shortcut_state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+        return;
+    }
+
+    let shortcut = state
+        .dictation_shortcut
+        .lock()
+        .ok()
+        .map(|value| value.clone())
+        .unwrap_or_else(|| default_dictation_shortcut().to_string());
+    minutes_core::logging::append_log(&serde_json::json!({
+        "ts": chrono::Local::now().to_rfc3339(),
+        "level": "info",
+        "step": "dictation_shortcut_event",
+        "file": "",
+        "extra": {
+            "shortcut": shortcut,
+            "state": "pressed",
+        }
+    }))
+    .ok();
+
+    if state.dictation_active.load(Ordering::Relaxed) {
+        minutes_core::logging::append_log(&serde_json::json!({
+            "ts": chrono::Local::now().to_rfc3339(),
+            "level": "info",
+            "step": "dictation_shortcut_action",
+            "file": "",
+            "extra": {
+                "shortcut": shortcut,
+                "action": "stop",
+            }
+        }))
+        .ok();
+        state.dictation_stop_flag.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    if let Err(error) = start_dictation_session(app, None) {
+        minutes_core::logging::append_log(&serde_json::json!({
+            "ts": chrono::Local::now().to_rfc3339(),
+            "level": "error",
+            "step": "dictation_shortcut_action",
+            "file": "",
+            "error": error,
+            "extra": {
+                "shortcut": shortcut,
+                "action": "start_failed",
+            }
+        }))
+        .ok();
+        show_user_notification(app, "Dictation", &error);
+    } else {
+        minutes_core::logging::append_log(&serde_json::json!({
+            "ts": chrono::Local::now().to_rfc3339(),
+            "level": "info",
+            "step": "dictation_shortcut_action",
+            "file": "",
+            "extra": {
+                "shortcut": shortcut,
+                "action": "start",
+            }
+        }))
+        .ok();
+    }
+}
+
 #[tauri::command]
 pub fn cmd_start_recording(
     app: tauri::AppHandle,
@@ -1659,6 +1776,11 @@ pub fn cmd_global_hotkey_settings(state: tauri::State<AppState>) -> HotkeySettin
 }
 
 #[tauri::command]
+pub fn cmd_dictation_shortcut_settings(state: tauri::State<AppState>) -> HotkeySettings {
+    current_dictation_shortcut_settings(&state)
+}
+
+#[tauri::command]
 pub fn cmd_set_global_hotkey(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -1697,6 +1819,62 @@ pub fn cmd_set_global_hotkey(
     }
 
     Ok(current_hotkey_settings(&state))
+}
+
+#[tauri::command]
+pub fn cmd_set_dictation_shortcut(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    enabled: bool,
+    shortcut: String,
+) -> Result<HotkeySettings, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let next_shortcut = validate_dictation_shortcut(&shortcut)?;
+    let previous = current_dictation_shortcut_settings(&state);
+    let manager = app.global_shortcut();
+    let quick_thought_shortcut = current_hotkey_settings(&state).shortcut;
+
+    if next_shortcut == quick_thought_shortcut {
+        return Err(format!(
+            "{} is already used by the quick-thought shortcut. Choose a different dictation shortcut.",
+            next_shortcut
+        ));
+    }
+
+    if previous.enabled {
+        manager
+            .unregister(previous.shortcut.as_str())
+            .map_err(|e| format!("Could not unregister {}: {}", previous.shortcut, e))?;
+    }
+
+    if enabled {
+        if let Err(e) = manager.register(next_shortcut.as_str()) {
+            if previous.enabled {
+                let _ = manager.register(previous.shortcut.as_str());
+            }
+            return Err(format!(
+                "Could not register {}. Another app may already be using it. ({})",
+                next_shortcut, e
+            ));
+        }
+    }
+
+    state
+        .dictation_shortcut_enabled
+        .store(enabled, Ordering::Relaxed);
+    if let Ok(mut current) = state.dictation_shortcut.lock() {
+        *current = next_shortcut.clone();
+    }
+
+    let mut config = Config::load();
+    config.dictation.shortcut_enabled = enabled;
+    config.dictation.shortcut = next_shortcut.clone();
+    config
+        .save()
+        .map_err(|e| format!("Failed to save config: {}", e))?;
+
+    Ok(current_dictation_shortcut_settings(&state))
 }
 
 #[tauri::command]
@@ -2221,6 +2399,8 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "auto_paste": config.dictation.auto_paste,
             "silence_timeout_ms": config.dictation.silence_timeout_ms,
             "max_utterance_secs": config.dictation.max_utterance_secs,
+            "shortcut_enabled": config.dictation.shortcut_enabled,
+            "shortcut": config.dictation.shortcut,
             "hotkey_enabled": config.dictation.hotkey_enabled,
             "hotkey_keycode": config.dictation.hotkey_keycode,
         },
@@ -2280,6 +2460,10 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             config.dictation.auto_paste = value == "true";
         }
         ("dictation", "cleanup_engine") => config.dictation.cleanup_engine = value.clone(),
+        ("dictation", "shortcut_enabled") => {
+            config.dictation.shortcut_enabled = value == "true";
+        }
+        ("dictation", "shortcut") => config.dictation.shortcut = value.clone(),
         ("dictation", "hotkey_enabled") => {
             config.dictation.hotkey_enabled = value == "true";
         }
@@ -2919,9 +3103,31 @@ pub fn start_dictation_hotkey_with_keycode(
         keycode,
         move |event| match event {
             HotkeyEvent::Press => {
+                minutes_core::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "info",
+                    "step": "dictation_hotkey_event",
+                    "file": "",
+                    "extra": {
+                        "event": "press",
+                        "keycode": keycode,
+                    }
+                }))
+                .ok();
                 let generation = {
                     let mut runtime = lock_dictation_hotkey_runtime();
                     if runtime.key_down {
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_skip",
+                            "file": "",
+                            "extra": {
+                                "reason": "key_already_down",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         return;
                     }
                     runtime.key_down = true;
@@ -2940,8 +3146,30 @@ pub fn start_dictation_hotkey_with_keycode(
                             && runtime.active_capture.is_none()
                     };
                     if !should_start_hold {
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_skip",
+                            "file": "",
+                            "extra": {
+                                "reason": "hold_threshold_not_met",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         return;
                     }
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "info",
+                        "step": "dictation_hotkey_action",
+                        "file": "",
+                        "extra": {
+                            "action": "start_hold",
+                            "keycode": keycode,
+                        }
+                    }))
+                    .ok();
                     if let Err(error) =
                         start_dictation_session(&app_for_hold, Some(HotkeyCaptureStyle::Hold))
                     {
@@ -2950,6 +3178,17 @@ pub fn start_dictation_hotkey_with_keycode(
                 });
             }
             HotkeyEvent::Release => {
+                minutes_core::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "info",
+                    "step": "dictation_hotkey_event",
+                    "file": "",
+                    "extra": {
+                        "event": "release",
+                        "keycode": keycode,
+                    }
+                }))
+                .ok();
                 let now = Instant::now();
                 let (active_capture, was_short_tap) = {
                     let mut runtime = lock_dictation_hotkey_runtime();
@@ -2960,6 +3199,17 @@ pub fn start_dictation_hotkey_with_keycode(
                 };
 
                 if matches!(active_capture, Some(HotkeyCaptureStyle::Hold)) {
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "info",
+                        "step": "dictation_hotkey_action",
+                        "file": "",
+                        "extra": {
+                            "action": "stop_hold",
+                            "keycode": keycode,
+                        }
+                    }))
+                    .ok();
                     if let Some(state) = app_for_events.try_state::<AppState>() {
                         state.dictation_stop_flag.store(true, Ordering::Relaxed);
                     }
@@ -2967,20 +3217,64 @@ pub fn start_dictation_hotkey_with_keycode(
                 }
 
                 if !was_short_tap {
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "info",
+                        "step": "dictation_hotkey_skip",
+                        "file": "",
+                        "extra": {
+                            "reason": "release_without_short_tap",
+                            "keycode": keycode,
+                        }
+                    }))
+                    .ok();
                     return;
                 }
 
                 if let Some(state) = app_for_events.try_state::<AppState>() {
                     if state.dictation_active.load(Ordering::Relaxed) {
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_action",
+                            "file": "",
+                            "extra": {
+                                "action": "stop_locked",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         state.dictation_stop_flag.store(true, Ordering::Relaxed);
                         return;
                     }
                 }
 
                 if dictation_pid_active() {
+                    minutes_core::logging::append_log(&serde_json::json!({
+                        "ts": chrono::Local::now().to_rfc3339(),
+                        "level": "info",
+                        "step": "dictation_hotkey_skip",
+                        "file": "",
+                        "extra": {
+                            "reason": "dictation_pid_active",
+                            "keycode": keycode,
+                        }
+                    }))
+                    .ok();
                     return;
                 }
 
+                minutes_core::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "info",
+                    "step": "dictation_hotkey_action",
+                    "file": "",
+                    "extra": {
+                        "action": "start_locked",
+                        "keycode": keycode,
+                    }
+                }))
+                .ok();
                 if let Err(error) =
                     start_dictation_session(&app_for_events, Some(HotkeyCaptureStyle::Locked))
                 {
@@ -2999,17 +3293,51 @@ pub fn start_dictation_hotkey_with_keycode(
                     HotkeyMonitorStatus::Starting => {
                         runtime.lifecycle = DictationHotkeyLifecycle::Starting;
                         runtime.last_error = None;
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_status",
+                            "file": "",
+                            "extra": {
+                                "state": "starting",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         (false, true)
                     }
                     HotkeyMonitorStatus::Active => {
                         runtime.lifecycle = DictationHotkeyLifecycle::Active;
                         runtime.last_error = None;
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_status",
+                            "file": "",
+                            "extra": {
+                                "state": "active",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         (false, true)
                     }
                     HotkeyMonitorStatus::Failed(message) => {
                         runtime.lifecycle = DictationHotkeyLifecycle::Failed;
                         runtime.last_error = Some(message);
                         runtime.monitor = None;
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "error",
+                            "step": "dictation_hotkey_status",
+                            "file": "",
+                            "error": runtime.last_error,
+                            "extra": {
+                                "state": "failed",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         (true, true)
                     }
                     HotkeyMonitorStatus::Stopped => {
@@ -3017,6 +3345,17 @@ pub fn start_dictation_hotkey_with_keycode(
                         runtime.last_error = None;
                         clear_dictation_hotkey_capture_state(&mut runtime);
                         runtime.monitor = None;
+                        minutes_core::logging::append_log(&serde_json::json!({
+                            "ts": chrono::Local::now().to_rfc3339(),
+                            "level": "info",
+                            "step": "dictation_hotkey_status",
+                            "file": "",
+                            "extra": {
+                                "state": "stopped",
+                                "keycode": keycode,
+                            }
+                        }))
+                        .ok();
                         (false, true)
                     }
                 }

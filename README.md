@@ -492,6 +492,10 @@ maintainer's Apple signing credentials:
   `MINUTES_DEV_SIGNING_IDENTITY` to a consistent local codesigning identity
 - release signing and notarization remain maintainer/release workflows
 
+For dictation, the recommended path is the standard shortcut in the desktop app
+(`Cmd/Ctrl + Shift + D` by default). The raw-key path for keys like `Caps Lock`
+is available as an advanced option but remains more fragile and permission-heavy.
+
 **Privacy:** All Minutes windows are hidden from screen sharing by default — other participants on Zoom/Meet/Teams won't see the app. Toggle via the tray menu: "Hide from Screen Share ✓".
 
 ### Troubleshooting
