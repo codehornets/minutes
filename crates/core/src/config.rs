@@ -54,6 +54,9 @@ pub struct TranscriptionConfig {
     /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" → ggml-silero-v6.2.0.bin).
     /// Set to empty string to disable VAD (falls back to energy-based silence stripping).
     pub vad_model: String,
+    /// Enable noise reduction via nnnoiseless (RNNoise) before transcription.
+    /// Requires the `denoise` feature flag. Default: true.
+    pub noise_reduction: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +283,7 @@ impl Default for TranscriptionConfig {
             min_words: 3,
             language: None,
             vad_model: "silero-v6.2.0".into(),
+            noise_reduction: true,
         }
     }
 }

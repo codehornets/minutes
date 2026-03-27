@@ -4,6 +4,12 @@ use std::path::Path;
 #[cfg(feature = "whisper")]
 use std::path::PathBuf;
 
+// Re-export from whisper-guard for public API compatibility
+pub use whisper_guard::audio::{normalize_audio, resample, strip_silence};
+#[cfg(feature = "whisper")]
+pub use whisper_guard::params::{default_whisper_params, streaming_whisper_params};
+pub use whisper_guard::segments::{clean_transcript, CleanStats};
+
 // ──────────────────────────────────────────────────────────────
 // Transcription pipeline:
 //
@@ -31,6 +37,14 @@ pub fn transcribe(audio_path: &Path, config: &Config) -> Result<String, Transcri
     if samples.is_empty() {
         return Err(TranscribeError::EmptyAudio);
     }
+
+    // Step 1b: Noise reduction (requires denoise feature + config enabled)
+    #[cfg(feature = "denoise")]
+    let samples = if config.transcription.noise_reduction {
+        denoise_audio(&samples, 16000)
+    } else {
+        samples
+    };
 
     // Step 2: Silence handling.
     // If Silero VAD model is available, whisper handles silence internally via
@@ -447,593 +461,106 @@ fn decode_with_symphonia(path: &Path) -> Result<Vec<f32>, TranscribeError> {
     Ok(normalize_audio(resampled))
 }
 
-/// Windowed-sinc resampler for high-quality rate conversion.
-///
-/// Linear interpolation introduces aliasing when downsampling (e.g. 44100→16000)
-/// because it doesn't low-pass filter first. This matters for whisper: aliased
-/// artifacts confuse the decoder and contribute to hallucination loops on
-/// non-English audio (issue #21).
-///
-/// This uses a sinc kernel with a Hann window (width=32 taps). The cutoff
-/// frequency is set to the Nyquist of the lower rate, preventing aliasing.
-/// Quality is comparable to ffmpeg's default SWR resampler.
-fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
-    if from_rate == to_rate {
-        return samples.to_vec();
-    }
+// resample() and normalize_audio() are provided by whisper_guard::audio
+// and re-exported at the top of this file.
 
-    let ratio = from_rate as f64 / to_rate as f64;
-    let output_len = (samples.len() as f64 / ratio) as usize;
-    let mut output = Vec::with_capacity(output_len);
+// Segment cleaning functions (dedup_segments, dedup_interleaved, trim_trailing_noise,
+// clean_transcript, CleanStats) are provided by whisper_guard::segments.
+// They are re-exported as pub use at the top of this file for API compatibility.
+// The private wrappers below delegate to whisper-guard so internal callers
+// (transcribe_with_whisper) continue working without path changes.
+#[cfg(feature = "whisper")]
+use whisper_guard::segments as wg_segments;
 
-    // Cutoff at Nyquist of the lower rate to prevent aliasing
-    let cutoff = if to_rate < from_rate {
-        to_rate as f64 / from_rate as f64
-    } else {
-        1.0
-    };
-
-    const HALF_WIDTH: i32 = 16; // 32-tap kernel
-
-    for i in 0..output_len {
-        let src_pos = i as f64 * ratio;
-        let src_center = src_pos as i32;
-
-        let mut sum = 0.0f64;
-        let mut weight_sum = 0.0f64;
-
-        for j in (src_center - HALF_WIDTH + 1)..=(src_center + HALF_WIDTH) {
-            if j < 0 || j >= samples.len() as i32 {
-                continue;
-            }
-
-            let delta = src_pos - j as f64;
-
-            // Sinc function with cutoff
-            let sinc = if delta.abs() < 1e-10 {
-                cutoff
-            } else {
-                let x = std::f64::consts::PI * delta * cutoff;
-                (x.sin() / (std::f64::consts::PI * delta)) * cutoff
-            };
-
-            // Hann window
-            let window_pos = (delta / HALF_WIDTH as f64 + 1.0) * 0.5;
-            let window = if (0.0..=1.0).contains(&window_pos) {
-                0.5 * (1.0 - (2.0 * std::f64::consts::PI * window_pos).cos())
-            } else {
-                0.0
-            };
-
-            let w = sinc * window;
-            sum += samples[j as usize] as f64 * w;
-            weight_sum += w;
-        }
-
-        let sample = if weight_sum.abs() > 1e-10 {
-            sum / weight_sum
-        } else {
-            0.0
-        };
-
-        output.push(sample as f32);
-    }
-
-    output
-}
-
-/// Normalize audio to a target peak level for consistent whisper input.
-/// Only boosts quiet audio — already-loud recordings are left untouched.
-fn normalize_audio(mut samples: Vec<f32>) -> Vec<f32> {
-    if samples.is_empty() {
-        return samples;
-    }
-
-    let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-
-    // Target peak: 0.5 (leaves headroom, loud enough for whisper)
-    // Only normalize if peak is below 0.1 (quiet mic) and above noise floor
-    const TARGET_PEAK: f32 = 0.5;
-    const QUIET_THRESHOLD: f32 = 0.1;
-    const NOISE_FLOOR: f32 = 0.0001;
-
-    if peak < QUIET_THRESHOLD && peak > NOISE_FLOOR {
-        let gain = TARGET_PEAK / peak;
-        // Cap gain at 100x to avoid amplifying pure noise
-        let gain = gain.min(100.0);
-        tracing::info!(
-            peak = format!("{:.4}", peak),
-            gain = format!("{:.1}x", gain),
-            "auto-normalizing quiet audio"
-        );
-        for s in &mut samples {
-            *s = (*s * gain).clamp(-1.0, 1.0);
-        }
-    }
-
-    samples
-}
-
-/// Detect and remove repetition loops from whisper output (issue #21).
-///
-/// Whisper's decoder can get stuck repeating the same text across consecutive segments,
-/// especially on non-English audio. This function detects runs of 3+ consecutive segments
-/// with >80% text overlap and collapses them to the first occurrence.
-#[allow(dead_code)] // Only used with whisper feature
+// Thin delegates to whisper-guard (only called by transcribe_with_whisper behind cfg(whisper))
+#[cfg(feature = "whisper")]
 fn dedup_segments(lines: Vec<String>) -> Vec<String> {
-    if lines.len() < 3 {
-        return lines;
-    }
-
-    // Extract just the text portion (after the timestamp) for comparison
-    fn text_part(line: &str) -> &str {
-        // Lines look like "[0:00] some text"
-        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
-    }
-
-    // Simple text similarity: ratio of matching chars to total chars (normalized)
-    fn similarity(a: &str, b: &str) -> f64 {
-        if a.is_empty() || b.is_empty() {
-            return 0.0;
-        }
-        let a_lower = a.to_lowercase();
-        let b_lower = b.to_lowercase();
-        if a_lower == b_lower {
-            return 1.0;
-        }
-        // Use longest common substring ratio as a fast similarity measure
-        let (short, long) = if a_lower.len() <= b_lower.len() {
-            (&a_lower, &b_lower)
-        } else {
-            (&b_lower, &a_lower)
-        };
-        if long.contains(short.as_str()) {
-            return short.len() as f64 / long.len() as f64;
-        }
-        // Count matching words as fallback
-        let a_words: Vec<&str> = a_lower.split_whitespace().collect();
-        let b_words: Vec<&str> = b_lower.split_whitespace().collect();
-        let matching = a_words.iter().filter(|w| b_words.contains(w)).count();
-        let total = a_words.len().max(b_words.len());
-        if total == 0 {
-            return 0.0;
-        }
-        matching as f64 / total as f64
-    }
-
-    let mut result = Vec::with_capacity(lines.len());
-    let mut i = 0;
-
-    while i < lines.len() {
-        // Look ahead for a run of similar segments
-        let base_text = text_part(&lines[i]);
-        let mut run_end = i + 1;
-
-        while run_end < lines.len() {
-            let candidate = text_part(&lines[run_end]);
-            if similarity(base_text, candidate) >= 0.8 {
-                run_end += 1;
-            } else {
-                break;
-            }
-        }
-
-        let run_len = run_end - i;
-
-        if run_len >= 3 {
-            // Repetition detected — keep only the first segment
-            tracing::warn!(
-                first_segment = i,
-                repeated_count = run_len,
-                text = base_text,
-                "detected repetition loop in whisper output — collapsing {} segments",
-                run_len
-            );
-            result.push(lines[i].clone());
-            result.push(format!(
-                "[...] [repeated audio removed — {} identical segments collapsed]",
-                run_len - 1
-            ));
-            i = run_end;
-        } else {
-            result.push(lines[i].clone());
-            i += 1;
-        }
-    }
-
-    result
+    wg_segments::dedup_segments(lines)
 }
-
-/// Clean an existing transcript by running all post-processing dedup layers.
-///
-/// Use this to re-process previously transcribed meetings through the improved
-/// hallucination detection (interleaved patterns, trailing noise). Takes the
-/// raw transcript text (lines like `[0:00] some text`) and returns cleaned text.
-pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
-    let lines: Vec<String> = transcript.lines().map(|l| l.to_string()).collect();
-    let original_count = lines.len();
-
-    // Run all dedup layers
-    let lines = dedup_segments(lines);
-    let after_consecutive = lines.len();
-
-    let lines = dedup_interleaved(lines);
-    let after_interleaved = lines.len();
-
-    let lines = trim_trailing_noise(lines);
-    let after_trim = lines.len();
-
-    let stats = CleanStats {
-        original_lines: original_count,
-        after_consecutive_dedup: after_consecutive,
-        after_interleaved_dedup: after_interleaved,
-        after_trailing_trim: after_trim,
-        lines_removed: original_count.saturating_sub(after_trim),
-    };
-
-    (lines.join("\n"), stats)
-}
-
-/// Statistics from transcript cleaning.
-#[derive(Debug)]
-pub struct CleanStats {
-    pub original_lines: usize,
-    pub after_consecutive_dedup: usize,
-    pub after_interleaved_dedup: usize,
-    pub after_trailing_trim: usize,
-    pub lines_removed: usize,
-}
-
-/// Detect interleaved repetition patterns that escape consecutive dedup.
-///
-/// Whisper often hallucinates alternating patterns like:
-///   "So I'm going to pick his brain" / "Okay." / "So I'm going to pick his brain" / "Okay."
-/// or inserts short filler between repeated phrases. The consecutive dedup misses these
-/// because no two adjacent lines are similar.
-///
-/// Strategy: use a sliding window to detect when a single phrase dominates a region.
-/// If any phrase appears in >=50% of lines within a 10-line window, and the window
-/// contains at least 5 such occurrences, collapse the entire dominated region.
-#[allow(dead_code)] // Only used with whisper feature
+#[cfg(feature = "whisper")]
 fn dedup_interleaved(lines: Vec<String>) -> Vec<String> {
-    if lines.len() < 6 {
-        return lines;
-    }
-
-    fn text_part(line: &str) -> &str {
-        // Lines: "[0:00] some text" or "[...] [repeated ...]"
-        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
-    }
-
-    fn normalize(text: &str) -> String {
-        text.to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Short filler phrases that whisper inserts between hallucinated repetitions.
-    fn is_filler(text: &str) -> bool {
-        let normalized = text.trim().to_lowercase();
-        let normalized = normalized.trim_matches(|c: char| !c.is_alphanumeric());
-        matches!(
-            normalized,
-            "okay"
-                | "ok"
-                | "yeah"
-                | "yes"
-                | "right"
-                | "so"
-                | "and"
-                | "but"
-                | "well"
-                | "uh"
-                | "um"
-                | "hmm"
-                | "mhm"
-        )
-    }
-
-    // Build normalized text for each line
-    let texts: Vec<String> = lines.iter().map(|l| normalize(text_part(l))).collect();
-    let fillers: Vec<bool> = texts.iter().map(|t| is_filler(t)).collect();
-
-    // Mark lines that are part of a hallucination region.
-    // A "hallucination region" is a contiguous span where one phrase dominates.
-    let mut remove = vec![false; lines.len()];
-
-    // Scan with a sliding window
-    let window_size = 10;
-    let min_occurrences = 5;
-
-    let mut i = 0;
-    while i + window_size <= lines.len() {
-        // Count phrase frequencies in this window (excluding fillers)
-        let mut freq: std::collections::BTreeMap<&str, Vec<usize>> =
-            std::collections::BTreeMap::new();
-        for j in i..i + window_size {
-            if !fillers[j] && !texts[j].is_empty() {
-                freq.entry(&texts[j]).or_default().push(j);
-            }
-        }
-
-        // Find the dominant phrase (BTreeMap for deterministic iteration order;
-        // break ties by phrase text so the result is reproducible across runs)
-        let dominant = freq
-            .iter()
-            .max_by(|(phrase_a, pos_a), (phrase_b, pos_b)| {
-                pos_a
-                    .len()
-                    .cmp(&pos_b.len())
-                    .then_with(|| phrase_a.cmp(phrase_b))
-            })
-            .filter(|(_, positions)| positions.len() >= min_occurrences);
-
-        if let Some((phrase, _)) = dominant {
-            let phrase = phrase.to_string();
-            // Extend the region: keep scanning forward while the phrase keeps appearing
-            let mut region_end = i + window_size;
-            while region_end < lines.len() {
-                let t = &texts[region_end];
-                if *t == phrase || fillers[region_end] {
-                    region_end += 1;
-                } else {
-                    // Allow a small gap (1-2 non-matching lines) if the phrase resumes
-                    let mut gap = 0;
-                    let mut found_resume = false;
-                    for t in texts
-                        .iter()
-                        .take(lines.len().min(region_end + 3))
-                        .skip(region_end)
-                    {
-                        if *t == phrase {
-                            found_resume = true;
-                            break;
-                        }
-                        gap += 1;
-                    }
-                    if found_resume && gap <= 2 {
-                        // Include the gap
-                        region_end += gap + 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            let region_len = region_end - i;
-
-            // Count actual occurrences of the dominant phrase in the full region
-            let actual_count = (i..region_end).filter(|&j| texts[j] == phrase).count();
-
-            if actual_count >= min_occurrences && region_len >= 6 {
-                tracing::warn!(
-                    region_start = i,
-                    region_end = region_end,
-                    occurrences = actual_count,
-                    filler_count = (i..region_end).filter(|&j| fillers[j]).count(),
-                    phrase = phrase,
-                    "detected interleaved hallucination loop — marking {} lines for removal",
-                    region_len
-                );
-                // Mark all lines in region except the first occurrence of the phrase
-                let mut kept_first = false;
-                for j in i..region_end {
-                    if !kept_first && texts[j] == phrase {
-                        kept_first = true; // keep the first one
-                    } else {
-                        remove[j] = true;
-                    }
-                }
-                i = region_end;
-                continue;
-            }
-        }
-
-        i += 1;
-    }
-
-    let removed_count = remove.iter().filter(|&&r| r).count();
-    if removed_count > 0 {
-        let mut result = Vec::with_capacity(lines.len() - removed_count + 1);
-        let mut in_removed_run = false;
-
-        for (idx, line) in lines.iter().enumerate() {
-            if remove[idx] {
-                if !in_removed_run {
-                    in_removed_run = true;
-                    // Count how many we're about to skip
-                    let run_len = (idx..lines.len()).take_while(|&j| remove[j]).count();
-                    result.push(format!(
-                        "[...] [hallucinated repetition removed — {} lines collapsed]",
-                        run_len
-                    ));
-                }
-            } else {
-                in_removed_run = false;
-                result.push(line.clone());
-            }
-        }
-
-        tracing::info!(
-            original = lines.len(),
-            removed = removed_count,
-            remaining = result.len(),
-            "interleaved dedup complete"
-        );
-        result
-    } else {
-        lines
-    }
+    wg_segments::dedup_interleaved(lines)
 }
-
-/// Trim trailing non-speech noise from the end of a transcript.
-///
-/// Recordings often capture music, silence, or ambient noise after the conversation
-/// ends. Long runs of `[music]`, `[BLANK_AUDIO]`, or very short filler at the end
-/// add no value and make the transcript look broken.
-#[allow(dead_code)] // Only used with whisper feature
+#[cfg(feature = "whisper")]
 fn trim_trailing_noise(lines: Vec<String>) -> Vec<String> {
-    if lines.is_empty() {
-        return lines;
-    }
-
-    fn text_part(line: &str) -> &str {
-        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
-    }
-
-    fn is_noise(text: &str) -> bool {
-        let t = text.trim().to_lowercase();
-        t == "[music]"
-            || t == "[blank_audio]"
-            || t == "[silence]"
-            || t == "music"
-            || t == "you"                // common whisper hallucination on silence
-            || t == "okay."
-            || t == "yeah."
-        // Note: collapse markers ("[...] [repeated ...]") are NOT noise —
-        // treating them as noise would make clean_transcript non-idempotent.
-    }
-
-    // Walk backward from the end, counting consecutive noise lines
-    let mut trim_from = lines.len();
-    for i in (0..lines.len()).rev() {
-        let text = text_part(&lines[i]);
-        if is_noise(text) {
-            trim_from = i;
-        } else {
-            break;
-        }
-    }
-
-    // Only trim if we're removing a significant trailing block (5+ lines)
-    let trimmed_count = lines.len() - trim_from;
-    if trimmed_count >= 5 {
-        tracing::info!(
-            trimmed = trimmed_count,
-            "removed trailing noise from transcript"
-        );
-        let mut result: Vec<String> = lines[..trim_from].to_vec();
-        result.push(format!(
-            "\n[Recording ended — {} lines of trailing noise removed]",
-            trimmed_count
-        ));
-        result
-    } else {
-        lines
-    }
+    wg_segments::trim_trailing_noise(lines)
 }
 
-/// Strip silence from audio using energy detection, replacing long gaps with short padding.
-///
-/// Whisper hallucinates repeating text when fed long silence segments,
-/// especially on non-English audio. This function:
-/// 1. Computes RMS energy per 100ms chunk with adaptive noise floor
-/// 2. Keeps all speech chunks plus context padding
-/// 3. Replaces silence gaps >500ms with 300ms of zero padding (enough for
-///    whisper to detect a segment boundary without triggering hallucination)
-fn strip_silence(samples: &[f32]) -> Vec<f32> {
-    const SAMPLE_RATE: usize = 16000;
-    const CHUNK_SIZE: usize = SAMPLE_RATE / 10; // 100ms chunks
-    const MAX_SILENCE_CHUNKS: usize = 5; // 500ms — silence beyond this gets trimmed
-    const PAD_CHUNKS: usize = 3; // 300ms of silence inserted at gap boundaries
-    const CONTEXT_CHUNKS: usize = 2; // 200ms of context kept around speech
-    const ENERGY_MULTIPLIER: f32 = 4.0; // speech must be 4x above noise floor
+// ── Noise reduction ──────────────────────────────────────────
 
-    if samples.len() < CHUNK_SIZE * 3 {
+/// Apply RNNoise-based noise reduction to audio samples.
+///
+/// nnnoiseless requires 48kHz f32 audio in 480-sample frames with values
+/// in i16 range (-32768 to 32767). This function handles resampling to/from
+/// 48kHz and the scaling automatically.
+///
+/// Primes the DenoiseState with a silence frame to avoid first-frame
+/// fade-in artifacts.
+#[cfg(feature = "denoise")]
+fn denoise_audio(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    use nnnoiseless::{DenoiseState, FRAME_SIZE};
+
+    if samples.is_empty() {
         return samples.to_vec();
     }
 
-    let num_chunks = samples.len() / CHUNK_SIZE;
+    // Resample to 48kHz if needed (nnnoiseless requires exactly 48kHz)
+    let (samples_48k, original_rate) = if sample_rate != 48000 {
+        (resample(samples, sample_rate, 48000), Some(sample_rate))
+    } else {
+        (samples.to_vec(), None)
+    };
 
-    // Phase 1: compute RMS per chunk
-    let rms_values: Vec<f32> = (0..num_chunks)
-        .map(|i| {
-            let start = i * CHUNK_SIZE;
-            let end = (start + CHUNK_SIZE).min(samples.len());
-            let chunk = &samples[start..end];
-            (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt()
-        })
-        .collect();
+    // Scale to i16 range as nnnoiseless expects
+    let scaled: Vec<f32> = samples_48k.iter().map(|s| s * 32767.0).collect();
 
-    // Phase 2: estimate noise floor from the quietest 20% of chunks
-    let mut sorted_rms = rms_values.clone();
-    sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let quiet_count = (num_chunks / 5).max(1);
-    let noise_floor =
-        (sorted_rms[..quiet_count].iter().sum::<f32>() / quiet_count as f32).clamp(0.0001, 0.02);
-    let threshold = noise_floor * ENERGY_MULTIPLIER;
+    let mut state = DenoiseState::new();
+    let mut output = Vec::with_capacity(scaled.len());
+    let mut frame_out = [0.0f32; FRAME_SIZE];
 
-    // Phase 3: classify chunks as speech (with hangover to avoid flapping)
-    let mut is_speech = vec![false; num_chunks];
-    let mut hangover = 0u32;
-    const HANGOVER_CHUNKS: u32 = 5; // 500ms hangover
-    for (i, rms) in rms_values.iter().enumerate() {
-        if *rms > threshold {
-            is_speech[i] = true;
-            hangover = HANGOVER_CHUNKS;
-        } else if hangover > 0 {
-            is_speech[i] = true;
-            hangover -= 1;
-        }
-    }
+    // Prime with a silence frame to avoid first-frame fade-in artifact
+    let silence = [0.0f32; FRAME_SIZE];
+    state.process_frame(&mut frame_out, &silence);
 
-    // Phase 4: expand speech regions by CONTEXT_CHUNKS in each direction
-    let mut keep = is_speech.clone();
-    for (i, &speech) in is_speech.iter().enumerate() {
-        if speech {
-            let from = i.saturating_sub(CONTEXT_CHUNKS);
-            let to = (i + CONTEXT_CHUNKS + 1).min(num_chunks);
-            for k in &mut keep[from..to] {
-                *k = true;
-            }
-        }
-    }
-
-    // Phase 5: assemble output — keep speech, replace long silence with short pad
-    let mut output = Vec::with_capacity(samples.len());
-    let mut consecutive_silence = 0usize;
-    let silence_pad: Vec<f32> = vec![0.0; PAD_CHUNKS * CHUNK_SIZE];
-
-    for (i, &kept) in keep.iter().enumerate() {
-        let start = i * CHUNK_SIZE;
-        let end = (start + CHUNK_SIZE).min(samples.len());
-
-        if kept {
-            if consecutive_silence > MAX_SILENCE_CHUNKS {
-                output.extend_from_slice(&silence_pad);
-            }
-            consecutive_silence = 0;
-            output.extend_from_slice(&samples[start..end]);
+    for chunk in scaled.chunks(FRAME_SIZE) {
+        if chunk.len() == FRAME_SIZE {
+            state.process_frame(&mut frame_out, chunk);
+            output.extend_from_slice(&frame_out);
         } else {
-            consecutive_silence += 1;
-            if consecutive_silence <= MAX_SILENCE_CHUNKS {
-                output.extend_from_slice(&samples[start..end]);
-            }
+            // Pad last frame with zeros
+            let mut padded = [0.0f32; FRAME_SIZE];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            state.process_frame(&mut frame_out, &padded);
+            output.extend_from_slice(&frame_out[..chunk.len()]);
         }
     }
 
-    // Include any trailing partial chunk
-    let remainder_start = num_chunks * CHUNK_SIZE;
-    if remainder_start < samples.len() {
-        output.extend_from_slice(&samples[remainder_start..]);
-    }
+    // Scale back to -1.0..1.0 range
+    let denoised: Vec<f32> = output.iter().map(|s| s / 32767.0).collect();
 
-    let original_secs = samples.len() as f64 / SAMPLE_RATE as f64;
-    let stripped_secs = output.len() as f64 / SAMPLE_RATE as f64;
-    if stripped_secs < original_secs * 0.95 {
-        tracing::info!(
-            original_secs = format!("{:.1}", original_secs),
-            stripped_secs = format!("{:.1}", stripped_secs),
-            removed_pct = format!("{:.0}", (1.0 - stripped_secs / original_secs) * 100.0),
-            "VAD stripped silence from audio"
-        );
-    }
+    // Resample back to original rate if we upsampled
+    let denoised = if let Some(orig) = original_rate {
+        resample(&denoised, 48000, orig)
+    } else {
+        denoised
+    };
 
-    output
+    let original_rms: f32 =
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+    let denoised_rms: f32 =
+        (denoised.iter().map(|s| s * s).sum::<f32>() / denoised.len() as f32).sqrt();
+
+    tracing::info!(
+        original_rms = format!("{:.4}", original_rms),
+        denoised_rms = format!("{:.4}", denoised_rms),
+        reduction_db = format!(
+            "{:.1}",
+            20.0 * (denoised_rms / original_rms.max(0.0001)).log10()
+        ),
+        "noise reduction applied"
+    );
+
+    denoised
 }
 
 /// Resolve the whisper model file path for dictation (uses dictation.model config).
@@ -1136,136 +663,16 @@ fn resolve_vad_model_path(config: &Config) -> Option<PathBuf> {
     None
 }
 
-/// Build whisper FullParams with sane defaults matching whisper.cpp CLI.
-///
-/// The whisper.cpp CLI uses `best_of=5`, entropy/logprob thresholds, and
-/// temperature fallback to prevent decoder loops on non-English or noisy
-/// audio. Without these, `Greedy { best_of: 1 }` can repeat gibberish
-/// indefinitely (see GitHub issue #21).
-///
-/// When a Silero VAD model is available, enables integrated VAD so whisper
-/// only transcribes speech segments (matching whisper-cli behavior exactly).
-///
-/// Use this for batch transcription. For latency-sensitive streaming,
-/// use [`streaming_whisper_params`] instead.
-#[cfg(feature = "whisper")]
-pub fn default_whisper_params<'a, 'b>(
-    vad_model_path: Option<&str>,
-) -> whisper_rs::FullParams<'a, 'b> {
-    let mut params =
-        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 5 });
-
-    // Match whisper.cpp CLI defaults for stable decoding
-    params.set_temperature(0.0);
-    params.set_temperature_inc(0.2); // retry at higher temp on high-entropy segments
-    params.set_entropy_thold(2.4); // flag segments with entropy above this
-    params.set_logprob_thold(-1.0); // flag segments with avg logprob below this
-    params.set_no_speech_thold(0.6); // probability threshold for silence detection
-    params.set_suppress_blank(true); // suppress blank/repeated token hallucinations
-
-    // Enable Silero VAD if model is available — this is the key difference vs whisper-cli.
-    // Without VAD, silence segments trigger decoder hallucination loops, especially on
-    // non-English audio (issue #21).
-    if let Some(path) = vad_model_path {
-        params.set_vad_model_path(Some(path));
-        params.enable_vad(true);
-        params.set_vad_params(whisper_rs::WhisperVadParams::default());
-        tracing::info!("Silero VAD enabled for transcription");
-    }
-
-    // Suppress noisy output
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-
-    params
-}
-
-/// Lighter whisper params for streaming/dictation where latency matters.
-///
-/// Keeps `best_of=1` and disables temperature fallback to stay within
-/// the ~200ms (base) / ~500ms (small) budget for partial transcription.
-/// Still sets entropy/logprob/no-speech thresholds and suppress_blank
-/// to catch the worst hallucinations without the 5x cost of best_of=5.
-#[cfg(feature = "whisper")]
-pub fn streaming_whisper_params<'a, 'b>() -> whisper_rs::FullParams<'a, 'b> {
-    let mut params =
-        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-
-    params.set_temperature(0.0);
-    params.set_temperature_inc(0.0); // no retry — latency budget too tight
-    params.set_entropy_thold(2.4);
-    params.set_logprob_thold(-1.0);
-    params.set_no_speech_thold(0.6);
-    params.set_suppress_blank(true);
-
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-
-    params
-}
-
-/// Get number of CPU threads to use for whisper.
+// default_whisper_params, streaming_whisper_params, and num_cpus
+// are re-exported from whisper_guard::params via `pub use` at the top of this file.
 #[cfg(feature = "whisper")]
 fn num_cpus() -> i32 {
-    std::thread::available_parallelism()
-        .map(|p| p.get() as i32)
-        .unwrap_or(4)
-        .min(8) // Cap at 8 — diminishing returns beyond that for whisper
+    whisper_guard::params::num_cpus()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resample_preserves_length_proportionally() {
-        let samples: Vec<f32> = (0..44100).map(|i| (i as f32 / 44100.0).sin()).collect();
-        let resampled = resample(&samples, 44100, 16000);
-        // Should be approximately 16000 samples
-        let expected = 16000;
-        assert!(
-            (resampled.len() as i64 - expected as i64).unsigned_abs() < 10,
-            "expected ~{} samples, got {}",
-            expected,
-            resampled.len()
-        );
-    }
-
-    #[test]
-    fn resample_noop_at_same_rate() {
-        let samples = vec![1.0f32, 2.0, 3.0, 4.0];
-        let resampled = resample(&samples, 16000, 16000);
-        assert_eq!(samples, resampled);
-    }
-
-    #[test]
-    fn normalize_boosts_quiet_audio() {
-        // Peak 0.01 → gain = 0.5/0.01 = 50x → new peak = 0.5
-        let samples = vec![0.005f32, -0.008, 0.01, -0.003, 0.007];
-        let normalized = normalize_audio(samples);
-        let peak = normalized.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(peak > 0.4, "expected peak > 0.4, got {}", peak);
-        assert!(peak <= 0.5, "expected peak <= 0.5, got {}", peak);
-    }
-
-    #[test]
-    fn normalize_leaves_loud_audio_untouched() {
-        let samples = vec![0.3f32, -0.5, 0.2, -0.1];
-        let normalized = normalize_audio(samples.clone());
-        assert_eq!(samples, normalized);
-    }
-
-    #[test]
-    fn normalize_ignores_noise_floor() {
-        let samples = vec![0.00001f32, -0.00002, 0.00001];
-        let normalized = normalize_audio(samples.clone());
-        // Below noise floor — should not be boosted
-        assert_eq!(samples, normalized);
-    }
 
     #[test]
     #[cfg(feature = "whisper")]
@@ -1277,6 +684,7 @@ mod tests {
                 min_words: 10,
                 language: Some("en".into()),
                 vad_model: String::new(),
+                noise_reduction: false,
             },
             ..Config::default()
         };
@@ -1343,297 +751,5 @@ mod tests {
         let result = load_audio_samples(&path);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("xyz"));
-    }
-
-    #[test]
-    fn strip_silence_preserves_speech() {
-        // 1s of "speech" (high energy sine wave)
-        let speech: Vec<f32> = (0..16000)
-            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
-            .collect();
-        let result = strip_silence(&speech);
-        // All speech — nothing should be stripped
-        assert_eq!(result.len(), speech.len());
-    }
-
-    #[test]
-    fn strip_silence_trims_long_silence() {
-        let mut samples = Vec::new();
-        // 1s speech
-        for i in 0..16000 {
-            samples.push(0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin());
-        }
-        // 5s silence
-        samples.extend(vec![0.0f32; 16000 * 5]);
-        // 1s speech
-        for i in 0..16000 {
-            samples.push(0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin());
-        }
-
-        let result = strip_silence(&samples);
-        // Should be significantly shorter than 7s (5s of silence trimmed)
-        let original_secs = samples.len() as f64 / 16000.0;
-        let result_secs = result.len() as f64 / 16000.0;
-        assert!(
-            result_secs < original_secs * 0.7,
-            "expected significant trimming: {:.1}s → {:.1}s",
-            original_secs,
-            result_secs
-        );
-        // But should still have both speech segments + padding
-        assert!(
-            result_secs > 2.0,
-            "should preserve both speech segments: {:.1}s",
-            result_secs
-        );
-    }
-
-    #[test]
-    fn strip_silence_keeps_short_pauses() {
-        let mut samples = Vec::new();
-        // 1s speech
-        for i in 0..16000 {
-            samples.push(0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin());
-        }
-        // 400ms silence (short natural pause — should be kept)
-        samples.extend(vec![0.0f32; 6400]);
-        // 1s speech
-        for i in 0..16000 {
-            samples.push(0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin());
-        }
-
-        let result = strip_silence(&samples);
-        // Short pause should be preserved — output ≈ input length
-        let ratio = result.len() as f64 / samples.len() as f64;
-        assert!(
-            ratio > 0.9,
-            "short pauses should be preserved: ratio {:.2}",
-            ratio
-        );
-    }
-
-    #[test]
-    fn strip_silence_handles_all_silence() {
-        let samples = vec![0.0f32; 16000 * 10]; // 10s of silence
-        let result = strip_silence(&samples);
-        // Should still produce something (short pad at minimum)
-        assert!(result.len() < samples.len() / 2, "should trim most silence");
-    }
-
-    #[test]
-    fn sinc_resample_no_aliasing() {
-        // Generate a 440Hz tone at 44100Hz, resample to 16000Hz.
-        // 440Hz is well below Nyquist (8000Hz), so it should survive.
-        let n = 44100;
-        let samples: Vec<f32> = (0..n)
-            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44100.0).sin())
-            .collect();
-        let resampled = resample(&samples, 44100, 16000);
-
-        // Check the resampled signal has reasonable amplitude (not attenuated to nothing)
-        let peak = resampled.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(
-            peak > 0.8,
-            "440Hz tone should survive resampling with peak > 0.8, got {}",
-            peak
-        );
-    }
-
-    #[test]
-    fn dedup_no_repetition() {
-        let lines = vec![
-            "[0:00] Hello world".into(),
-            "[0:03] How are you".into(),
-            "[0:06] Fine thanks".into(),
-        ];
-        let result = dedup_segments(lines.clone());
-        assert_eq!(result, lines);
-    }
-
-    #[test]
-    fn dedup_collapses_exact_repetition() {
-        let lines = vec![
-            "[0:00] Hello world".into(),
-            "[0:03] Hello world".into(),
-            "[0:06] Hello world".into(),
-            "[0:09] Hello world".into(),
-            "[0:12] Something different".into(),
-        ];
-        let result = dedup_segments(lines);
-        assert_eq!(result.len(), 3); // first + marker + different
-        assert!(result[0].contains("Hello world"));
-        assert!(result[1].contains("repeated audio removed"));
-        assert!(result[2].contains("Something different"));
-    }
-
-    #[test]
-    fn dedup_collapses_near_identical() {
-        // Whisper often produces slight variations of the same repeated text
-        let lines = vec![
-            "[0:00] Ok bene le macedi diesel".into(),
-            "[0:03] Ok, bene le macedi diesel".into(),
-            "[0:06] Ok bene, le macedi diesel".into(),
-            "[0:09] Good morning".into(),
-        ];
-        let result = dedup_segments(lines);
-        assert_eq!(result.len(), 3); // first + marker + different
-        assert!(result[1].contains("repeated audio removed"));
-    }
-
-    #[test]
-    fn dedup_leaves_two_similar_alone() {
-        // Only 2 similar — below threshold of 3
-        let lines = vec![
-            "[0:00] Hello world".into(),
-            "[0:03] Hello world".into(),
-            "[0:06] Something else".into(),
-        ];
-        let result = dedup_segments(lines.clone());
-        assert_eq!(result, lines);
-    }
-
-    #[test]
-    fn dedup_handles_empty() {
-        let result = dedup_segments(vec![]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn dedup_handles_single_line() {
-        let lines = vec!["[0:00] Hello".into()];
-        let result = dedup_segments(lines.clone());
-        assert_eq!(result, lines);
-    }
-
-    #[test]
-    fn dedup_multiple_runs() {
-        let lines = vec![
-            "[0:00] First phrase".into(),
-            "[0:03] First phrase".into(),
-            "[0:06] First phrase".into(),
-            "[0:09] Second phrase".into(),
-            "[0:12] Second phrase".into(),
-            "[0:15] Second phrase".into(),
-            "[0:18] Second phrase".into(),
-            "[0:21] Normal text".into(),
-        ];
-        let result = dedup_segments(lines);
-        // Two collapsed runs + normal text
-        assert_eq!(result.len(), 5); // first + marker + second + marker + normal
-        assert!(result[1].contains("2 identical"));
-        assert!(result[3].contains("3 identical"));
-    }
-
-    // ── Interleaved dedup tests ──
-
-    #[test]
-    fn interleaved_catches_alternating_pattern() {
-        // The pharmacy recording pattern: phrase / "Okay." / phrase / "Okay." ...
-        let mut lines: Vec<String> = Vec::new();
-        for i in 0..20 {
-            let ts = i * 2;
-            if i % 2 == 0 {
-                lines.push(format!(
-                    "[{}:{:02}] So I'm going to pick his brain as well.",
-                    ts / 60,
-                    ts % 60
-                ));
-            } else {
-                lines.push(format!("[{}:{:02}] Okay.", ts / 60, ts % 60));
-            }
-        }
-        lines.push("[0:40] Something completely different".into());
-
-        let result = dedup_interleaved(lines);
-        // Should keep: the first occurrence of the phrase + collapse marker + the different line
-        assert!(
-            result.len() <= 4,
-            "expected <=4 lines, got {}: {:?}",
-            result.len(),
-            result
-        );
-        assert!(result.iter().any(|l| l.contains("pick his brain")));
-        assert!(result
-            .iter()
-            .any(|l| l.contains("hallucinated repetition removed")));
-        assert!(result
-            .last()
-            .unwrap()
-            .contains("Something completely different"));
-    }
-
-    #[test]
-    fn interleaved_leaves_normal_conversation() {
-        let lines = vec![
-            "[0:00] Hello how are you".into(),
-            "[0:05] I'm fine thanks".into(),
-            "[0:10] Great to hear".into(),
-            "[0:15] Let's talk about the project".into(),
-            "[0:20] Sure what's the update".into(),
-            "[0:25] We shipped the feature".into(),
-        ];
-        let result = dedup_interleaved(lines.clone());
-        assert_eq!(result, lines);
-    }
-
-    #[test]
-    fn interleaved_ignores_short_repeats() {
-        // Only 3 occurrences in 6 lines — below threshold
-        let lines = vec![
-            "[0:00] Hello world".into(),
-            "[0:02] Okay.".into(),
-            "[0:04] Hello world".into(),
-            "[0:06] Okay.".into(),
-            "[0:08] Hello world".into(),
-            "[0:10] Something else".into(),
-        ];
-        let result = dedup_interleaved(lines.clone());
-        // 3 occurrences in a 6-line span — below the min_occurrences=5 threshold
-        assert_eq!(result, lines);
-    }
-
-    // ── Trailing noise tests ──
-
-    #[test]
-    fn trim_trailing_music() {
-        let mut lines: Vec<String> = vec![
-            "[0:00] Hello world".into(),
-            "[0:05] Some real content".into(),
-        ];
-        for i in 0..20 {
-            lines.push(format!("[{}:00] [music]", i + 1));
-        }
-        let result = trim_trailing_noise(lines);
-        assert_eq!(result.len(), 3); // 2 real lines + trim marker
-        assert!(result[0].contains("Hello world"));
-        assert!(result[1].contains("real content"));
-        assert!(result[2].contains("trailing noise removed"));
-    }
-
-    #[test]
-    fn trim_keeps_short_trailing_noise() {
-        // Only 3 trailing music lines — below the 5-line threshold
-        let lines = vec![
-            "[0:00] Hello world".into(),
-            "[0:05] [music]".into(),
-            "[0:10] [music]".into(),
-            "[0:15] [music]".into(),
-        ];
-        let result = trim_trailing_noise(lines.clone());
-        assert_eq!(result, lines); // unchanged
-    }
-
-    #[test]
-    fn trim_handles_empty() {
-        assert!(trim_trailing_noise(vec![]).is_empty());
-    }
-
-    #[test]
-    fn trim_all_noise() {
-        let lines: Vec<String> = (0..10).map(|i| format!("[{}:00] [music]", i)).collect();
-        let result = trim_trailing_noise(lines);
-        // All noise — trim everything, left with just the marker
-        assert_eq!(result.len(), 1);
-        assert!(result[0].contains("trailing noise removed"));
     }
 }

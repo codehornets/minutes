@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/reader", "tauri/src-tauri"]
+members = ["crates/core", "crates/cli", "crates/reader", "crates/whisper-guard", "tauri/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -60,6 +60,9 @@ schemars = { version = "1", features = ["derive", "chrono04"] }
 
 # Audio format conversion
 symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }
+
+# Noise reduction (pure Rust RNNoise port)
+nnnoiseless = "0.5"
 
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
