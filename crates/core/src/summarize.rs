@@ -966,7 +966,8 @@ fn run_speaker_mapping_prompt(
                 .ok_or_else(|| "No text in response".into())
         }
         "mistral" => {
-            let api_key = std::env::var("MISTRAL_API_KEY").map_err(|_| "MISTRAL_API_KEY not set")?;
+            let api_key =
+                std::env::var("MISTRAL_API_KEY").map_err(|_| "MISTRAL_API_KEY not set")?;
             let body = serde_json::json!({"model": &config.summarization.mistral_model, "max_tokens": 256, "messages":[{"role":"user","content":prompt}]});
             let resp: serde_json::Value = ureq::post("https://api.mistral.ai/v1/chat/completions")
                 .header("Authorization", &format!("Bearer {}", api_key))
