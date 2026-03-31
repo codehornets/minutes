@@ -35,6 +35,8 @@ pub struct FilterStats {
     pub after_noise_markers: usize,
     /// After trailing noise trim
     pub after_trailing_trim: usize,
+    /// Segments rescued from the no_speech filter (would have been blank otherwise)
+    pub rescued_no_speech: usize,
     /// Final word count
     pub final_words: usize,
 }
@@ -52,7 +54,12 @@ impl FilterStats {
         if self.raw_segments == 0 {
             return parts.join(", ");
         }
-        if self.skipped_no_speech > 0 {
+        if self.rescued_no_speech > 0 {
+            parts.push(format!(
+                "no_speech rescue: {} segments saved (would have been blank)",
+                self.rescued_no_speech
+            ));
+        } else if self.skipped_no_speech > 0 {
             parts.push(format!(
                 "no_speech filter: -{} → {}",
                 self.skipped_no_speech, self.after_no_speech_filter
@@ -196,7 +203,33 @@ fn transcribe_whisper_dispatch(
     // Step 3: Transcribe
     #[cfg(feature = "whisper")]
     {
-        transcribe_with_whisper(&samples, audio_path, config, stats)
+        let result = transcribe_with_whisper(&samples, audio_path, config, stats, false)?;
+
+        // Step 4: Auto-retry without VAD if the first attempt blanked on long audio.
+        // Silero VAD can be too aggressive on certain acoustic profiles or non-English
+        // audio, causing whisper to see almost no speech segments. Retrying with
+        // energy-based silence stripping gives whisper the full audio.
+        if result.stats.final_words == 0
+            && use_integrated_vad
+            && result.stats.audio_duration_secs > 60.0
+        {
+            tracing::warn!(
+                audio_secs = format!("{:.0}", result.stats.audio_duration_secs),
+                raw_segments = result.stats.raw_segments,
+                "blank transcript from long audio with VAD — retrying without VAD"
+            );
+            let mut retry_stats = FilterStats {
+                audio_duration_secs: result.stats.audio_duration_secs,
+                ..Default::default()
+            };
+            let stripped = strip_silence(&samples, 16000);
+            retry_stats.samples_after_silence_strip = stripped.len();
+            if !stripped.is_empty() {
+                return transcribe_with_whisper(&stripped, audio_path, config, retry_stats, true);
+            }
+        }
+
+        Ok(result)
     }
 
     #[cfg(not(feature = "whisper"))]
@@ -236,16 +269,20 @@ fn transcribe_parakeet_dispatch(
 }
 
 /// Real transcription using whisper.cpp via whisper-rs.
+///
+/// When `force_disable_vad` is true, Silero VAD is not passed to whisper even if
+/// the model exists. Used for retry after VAD-enabled transcription produced a blank.
 #[cfg(feature = "whisper")]
 fn transcribe_with_whisper(
     samples: &[f32],
     _audio_path: &Path,
     config: &Config,
     mut stats: FilterStats,
+    force_disable_vad: bool,
 ) -> Result<TranscribeResult, TranscribeError> {
     // Load whisper model
     let model_path = resolve_model_path(config)?;
-    tracing::info!(model = %model_path.display(), "loading whisper model");
+    tracing::info!(model = %model_path.display(), vad_disabled = force_disable_vad, "loading whisper model");
 
     let ctx = whisper_rs::WhisperContext::new_with_params(
         model_path
@@ -265,8 +302,13 @@ fn transcribe_with_whisper(
         .create_state()
         .map_err(|e| TranscribeError::TranscriptionFailed(format!("create state: {}", e)))?;
 
-    // Resolve VAD model path and convert to string for FullParams lifetime
-    let vad_path = resolve_vad_model_path(config);
+    // Resolve VAD model path and convert to string for FullParams lifetime.
+    // Skip VAD on retry — it may have been too aggressive on this audio.
+    let vad_path = if force_disable_vad {
+        None
+    } else {
+        resolve_vad_model_path(config)
+    };
     let vad_path_str = vad_path.as_ref().and_then(|p| p.to_str());
     let mut params = default_whisper_params(vad_path_str);
     params.set_n_threads(num_cpus());
@@ -274,9 +316,11 @@ fn transcribe_with_whisper(
     params.set_token_timestamps(true);
 
     // Abort callback: prevents infinite hangs on large models with problematic audio.
-    // Timeout scales with audio duration: base 5 min + 10x audio length (e.g. 35s audio → 5:35 max).
+    // Timeout: base 5 min + 3x audio length, capped at 1 hour.
+    // The small model transcribes ~15-30x faster than realtime on Apple Silicon,
+    // so 3x is generous. The old 10x formula gave 7-hour timeouts for 43-min recordings.
     let audio_duration_secs = samples.len() as f64 / 16000.0;
-    let timeout_secs = 300.0 + (audio_duration_secs * 10.0);
+    let timeout_secs = (300.0 + (audio_duration_secs * 3.0)).min(3600.0);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_secs);
     params.set_abort_callback_safe(move || {
         let exceeded = std::time::Instant::now() > deadline;
@@ -305,26 +349,18 @@ fn transcribe_with_whisper(
     let num_segments = state.full_n_segments();
     stats.raw_segments = num_segments as usize;
 
-    // Collect segments, filtering by no_speech probability
+    // Collect segments, filtering by no_speech probability.
+    // We keep two lists: filtered (normal path) and rescued (all segments with text).
+    // If the filter would produce 0 lines, we rescue the unfiltered segments instead
+    // of producing a blank transcript — a noisy transcript beats nothing for long recordings.
     let mut lines: Vec<String> = Vec::new();
+    let mut rescued_lines: Vec<String> = Vec::new();
     let mut skipped_no_speech = 0u32;
     for i in 0..num_segments {
         let segment = match state.get_segment(i) {
             Some(seg) => seg,
             None => continue,
         };
-
-        // Layer 3: Skip segments with high no_speech probability (likely hallucination)
-        let no_speech_prob = segment.no_speech_probability();
-        if no_speech_prob > 0.8 {
-            skipped_no_speech += 1;
-            tracing::debug!(
-                segment = i,
-                no_speech_prob = format!("{:.2}", no_speech_prob),
-                "skipping segment — high no_speech probability"
-            );
-            continue;
-        }
 
         let start_ts = segment.start_timestamp();
         let text = segment
@@ -338,7 +374,40 @@ fn transcribe_with_whisper(
 
         let mins = start_ts / 6000;
         let secs = (start_ts % 6000) / 100;
-        lines.push(format!("[{}:{:02}] {}", mins, secs, text));
+        let line = format!("[{}:{:02}] {}", mins, secs, text);
+
+        // Layer 3: Skip segments with high no_speech probability (likely hallucination)
+        let no_speech_prob = segment.no_speech_probability();
+        if no_speech_prob > 0.8 {
+            skipped_no_speech += 1;
+            tracing::debug!(
+                segment = i,
+                no_speech_prob = format!("{:.2}", no_speech_prob),
+                "flagged segment — high no_speech probability"
+            );
+            rescued_lines.push(line);
+            continue;
+        }
+
+        rescued_lines.push(line.clone());
+        lines.push(line);
+    }
+
+    // Rescue: if ALL segments were filtered out but some had text, keep them.
+    // This prevents blank transcripts from long recordings where the no_speech
+    // detector was wrong (common with non-English audio or unusual acoustics).
+    if lines.is_empty() && !rescued_lines.is_empty() {
+        let rescued_count = rescued_lines.len();
+        tracing::warn!(
+            rescued = rescued_count,
+            skipped_no_speech = skipped_no_speech,
+            audio_secs = format!("{:.0}", stats.audio_duration_secs),
+            "no_speech filter would blank the transcript — rescuing all segments"
+        );
+        lines = rescued_lines;
+        stats.rescued_no_speech = rescued_count;
+        // Don't count these as skipped since we rescued them
+        skipped_no_speech = 0;
     }
 
     stats.skipped_no_speech = skipped_no_speech as usize;
@@ -1693,5 +1762,78 @@ mod tests {
             "error should tell user how to fix it: {}",
             err
         );
+    }
+
+    #[test]
+    fn diagnosis_shows_rescue_when_all_segments_would_be_filtered() {
+        let stats = FilterStats {
+            audio_duration_secs: 2585.0,
+            samples_after_silence_strip: 16000 * 2585,
+            raw_segments: 1,
+            skipped_no_speech: 0, // 0 because rescue set it to 0
+            after_no_speech_filter: 1,
+            after_dedup: 1,
+            after_interleaved: 1,
+            after_script_filter: 1,
+            after_noise_markers: 1,
+            after_trailing_trim: 1,
+            rescued_no_speech: 1,
+            final_words: 5,
+        };
+        let d = stats.diagnosis();
+        assert!(
+            d.contains("no_speech rescue: 1 segments saved"),
+            "should report rescue: {}",
+            d
+        );
+        assert!(
+            !d.contains("no_speech filter:"),
+            "should not show filter when rescue happened: {}",
+            d
+        );
+        assert!(d.contains("final: 5 words"), "should show final words: {}", d);
+    }
+
+    #[test]
+    fn diagnosis_shows_normal_no_speech_filter_when_some_segments_survive() {
+        let stats = FilterStats {
+            audio_duration_secs: 300.0,
+            samples_after_silence_strip: 16000 * 300,
+            raw_segments: 50,
+            skipped_no_speech: 5,
+            after_no_speech_filter: 45,
+            after_dedup: 45,
+            after_interleaved: 45,
+            after_script_filter: 45,
+            after_noise_markers: 45,
+            after_trailing_trim: 45,
+            rescued_no_speech: 0,
+            final_words: 500,
+        };
+        let d = stats.diagnosis();
+        assert!(
+            d.contains("no_speech filter: -5 → 45"),
+            "should show normal filter: {}",
+            d
+        );
+        assert!(
+            !d.contains("rescue"),
+            "should not mention rescue: {}",
+            d
+        );
+    }
+
+    #[test]
+    fn timeout_cap_limits_to_one_hour() {
+        // 43 minutes of audio: old formula gave 300 + 2580 * 10 = 26100s (7+ hours)
+        // New formula: min(300 + 2580 * 3, 3600) = 3600s (1 hour)
+        let audio_secs = 2580.0_f64;
+        let timeout = (300.0 + (audio_secs * 3.0)).min(3600.0);
+        assert_eq!(timeout, 3600.0, "should cap at 1 hour for long audio");
+
+        // Short audio: 30 seconds → 300 + 90 = 390s (no cap needed)
+        let short_audio = 30.0_f64;
+        let timeout = (300.0 + (short_audio * 3.0)).min(3600.0);
+        assert_eq!(timeout, 390.0, "short audio should not be capped");
     }
 }
