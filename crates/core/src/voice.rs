@@ -360,7 +360,15 @@ mod tests {
     #[test]
     fn save_and_list() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 512], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &vec![0.1f32; 512],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
         let profiles = list_profiles(&conn).unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].person_slug, "mat");
@@ -370,16 +378,48 @@ mod tests {
     #[test]
     fn upsert_increments_count() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
-        save_profile(&conn, "mat", "Mat", &vec![0.2f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &vec![0.1f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &vec![0.2f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
         assert_eq!(list_profiles(&conn).unwrap()[0].sample_count, 2);
     }
 
     #[test]
     fn blended_averages() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &[1.0f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
-        save_profile_blended(&conn, "mat", "Mat", &[3.0f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &[1.0f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
+        save_profile_blended(
+            &conn,
+            "mat",
+            "Mat",
+            &[3.0f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
         let p = load_profile_with_embedding(&conn, "mat").unwrap().unwrap();
         assert!((p.embedding[0] - 2.0).abs() < 1e-6);
     }
@@ -387,7 +427,15 @@ mod tests {
     #[test]
     fn delete_works() {
         let (conn, _tmp) = test_db();
-        save_profile(&conn, "mat", "Mat", &vec![0.1f32; 4], "self-enrollment", TEST_MODEL_VERSION).unwrap();
+        save_profile(
+            &conn,
+            "mat",
+            "Mat",
+            &vec![0.1f32; 4],
+            "self-enrollment",
+            TEST_MODEL_VERSION,
+        )
+        .unwrap();
         assert!(delete_profile(&conn, "mat").unwrap());
         assert!(list_profiles(&conn).unwrap().is_empty());
     }

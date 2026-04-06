@@ -2330,19 +2330,18 @@ fn cmd_setup_diarization() -> Result<()> {
     let model_dir = &config.diarization.model_path;
     std::fs::create_dir_all(model_dir)?;
 
-    eprintln!("Embedding model: {} ({})", config.diarization.embedding_model, emb_info.filename);
+    eprintln!(
+        "Embedding model: {} ({})",
+        config.diarization.embedding_model, emb_info.filename
+    );
 
-    let models: [(& str, &str, &str); 2] = [
+    let models: [(&str, &str, &str); 2] = [
         (
             diarize::SEGMENTATION_MODEL,
             diarize::SEGMENTATION_MODEL_URL,
             "segmentation",
         ),
-        (
-            emb_info.filename,
-            emb_info.url,
-            "speaker embedding",
-        ),
+        (emb_info.filename, emb_info.url, "speaker embedding"),
     ];
 
     let mut all_exist = true;
@@ -4002,8 +4001,15 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    voice::save_profile_blended(&conn, &slug, &my_name, &embedding, "self-enrollment", voice::model_version(config))
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    voice::save_profile_blended(
+        &conn,
+        &slug,
+        &my_name,
+        &embedding,
+        "self-enrollment",
+        voice::model_version(config),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
     if let Some(p) = profiles.iter().find(|p| p.person_slug == slug) {
@@ -4136,8 +4142,15 @@ fn cmd_confirm(
                             .collect::<String>()
                             .trim_matches('-')
                             .to_string();
-                        voice::save_profile_blended(&conn, &slug, new_name, embedding, "confirmed", voice::model_version(config))
-                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        voice::save_profile_blended(
+                            &conn,
+                            &slug,
+                            new_name,
+                            embedding,
+                            "confirmed",
+                            voice::model_version(config),
+                        )
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                         eprintln!(
                             "Voice profile saved for {} (from confirmed meeting)",
                             new_name
