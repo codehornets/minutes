@@ -68,6 +68,7 @@ Current local conclusion:
 - The strongest available evidence on this machine points toward an extension/plugin-oriented integration model for Cowork, not “raw Minutes MCP server automatically appears everywhere.”
 - Minutes should be prepared to package a Cowork-facing extension or plugin surface if we want first-class Cowork behavior.
 - The repo now includes a proof-of-life Cowork extension bundle scaffold under `integrations/claude-cowork-extension/` plus `scripts/build_cowork_extension.sh` so the next verification step is install-and-check, not inventing the package format from scratch.
+- As of 2026-04-09, the local extension bundle build itself is verified via `scripts/build_cowork_extension.sh` and `scripts/check_cowork_extension.sh`. What remains unverified is the in-Cowork install/runtime path, not the bundle build.
 
 ## Important Unknowns
 

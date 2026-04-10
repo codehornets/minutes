@@ -470,6 +470,7 @@ fn main() {
     let processing = Arc::new(AtomicBool::new(false));
     let processing_stage = Arc::new(Mutex::new(None));
     let latest_output = Arc::new(Mutex::new(None));
+    let activation_progress = commands::load_activation_progress(&startup_config_snapshot);
     let completion_notifications_enabled = Arc::new(AtomicBool::new(true));
     let global_hotkey_enabled = Arc::new(AtomicBool::new(false));
     let global_hotkey_shortcut =
@@ -615,6 +616,7 @@ fn main() {
             processing: processing.clone(),
             processing_stage: processing_stage.clone(),
             latest_output: latest_output.clone(),
+            activation_progress: activation_progress.clone(),
             call_capture_health: Arc::new(Mutex::new(None)),
             completion_notifications_enabled: completion_notifications_enabled.clone(),
             screen_share_hidden: screen_share_hidden.clone(),
@@ -700,6 +702,7 @@ fn main() {
                     processing.clone(),
                     processing_stage.clone(),
                     latest_output.clone(),
+                    activation_progress.clone(),
                     completion_notifications_enabled.clone(),
                 );
             }
@@ -1282,6 +1285,9 @@ fn main() {
             commands::cmd_read_text_file,
             commands::cmd_get_text_file_access,
             commands::cmd_get_text_file_review,
+            commands::cmd_recent_artifacts,
+            commands::cmd_get_recall_workspace_state,
+            commands::cmd_set_recall_workspace_state,
             commands::cmd_write_text_file,
             commands::cmd_restore_text_file_snapshot,
             commands::cmd_promote_text_file_to_artifact,
@@ -1299,6 +1305,8 @@ fn main() {
             commands::cmd_recovery_items,
             commands::cmd_retry_recovery,
             commands::cmd_retry_processing_job,
+            commands::cmd_weekly_summary,
+            commands::cmd_proactive_context_bundle,
             commands::cmd_list_devices,
             commands::cmd_delete_meeting,
             commands::cmd_get_meeting_detail,
@@ -1306,6 +1314,7 @@ fn main() {
             commands::cmd_confirm_speaker,
             commands::cmd_needs_setup,
             commands::cmd_download_model,
+            commands::cmd_mark_activation_nudge_shown,
             commands::cmd_upcoming_meetings,
             commands::cmd_spawn_terminal,
             commands::cmd_pty_input,

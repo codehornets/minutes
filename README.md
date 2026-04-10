@@ -61,6 +61,17 @@ The README is now the product overview and install guide, not the only home for 
 - Concise agent index: <https://useminutes.app/llms.txt>
 - Full agent index: <https://useminutes.app/llms-full.txt>
 
+## Choose your surface
+
+- `Desktop app` — `brew install --cask silverstein/tap/minutes`
+  Best for first recording, live capture, Recall, and post-meeting artifact work.
+- `MCP server` — `npx minutes-mcp`
+  Best for agent-first search, recall, and meeting-memory workflows in Claude Desktop, Codex, Gemini CLI, and other MCP clients.
+- `CLI` — `brew tap silverstein/tap && brew install minutes`
+  Best for terminal-first local operator workflows, import, search, and vault sync.
+- `Claude Code plugin` — `claude plugin marketplace add silverstein/minutes`
+  Best for workflow guidance, prep, debrief, and meeting coaching with the lifecycle skills and hooks.
+
 ## How it works
 
 ```
@@ -483,7 +494,7 @@ same local meeting artifacts. It runs as a singleton assistant session:
 - Auto-updates from GitHub Releases with signed artifacts, never interrupting a recording
 
 ### Cowork / Dispatch
-MCP tools are automatically available in Cowork. From your phone via Dispatch: *"Start recording"* → Mac captures → Claude processes → summary on your phone.
+The currently verified path for Cowork is plugin-oriented, not “raw MCP automatically appears everywhere.” Minutes ships a Cowork extension scaffold under `integrations/claude-cowork-extension/` and a local bundle build script at `scripts/build_cowork_extension.sh`. On this machine, the bundle build is verified; actual in-Cowork install/use remains a proof-of-life workflow, not a guaranteed default path. Treat Dispatch-triggered recording and other mobile workflows as experimental until the plugin-native path is installed and checked end to end.
 
 ### Optional: automated summarization
 
@@ -503,6 +514,57 @@ mistral_model = "mistral-large-latest"
 engine = "ollama"
 ollama_model = "llama3.2"
 ```
+
+### File-backed automation primitives
+
+Minutes can emit small automation artifacts that are easy to schedule with
+`launchd`, `cron`, or any external runner.
+
+```bash
+minutes automate weekly-summary --json
+minutes automate proactive-context --json
+```
+
+Each run writes:
+
+- a markdown artifact under `~/.minutes/automation-runs/`
+- a matching JSON run record beside it
+
+This is intentionally simple: explicit files, explicit output paths, and no
+hidden scheduler subsystem.
+
+### Codex epic runner
+
+When you want Codex to keep draining a `bd` epic instead of stopping after one
+child bead, use the repo-local epic runner:
+
+```bash
+node scripts/codex_epic_runner.mjs <epic-id> -- --full-auto
+```
+
+What it does:
+
+- uses `bd` as the source of truth for epic ancestry and ready work
+- picks the next ready non-epic descendant bead under the target epic
+- claims that bead, runs `codex exec` against it, then checks whether the bead was actually closed
+- continues only after a real close; pauses on blocked/needs-human outcomes instead of guessing
+
+Dry-run the order first:
+
+```bash
+node scripts/codex_epic_runner.mjs <epic-id> --dry-run
+```
+
+If you install a Taskmaster-style Codex wrapper later, use it as the per-bead
+engine without changing the epic logic:
+
+```bash
+node scripts/codex_epic_runner.mjs <epic-id> --taskmaster -- --sandbox danger-full-access -a never
+```
+
+This is intentionally separate from the Claude plugin hooks. The Minutes plugin
+hooks are Claude-specific today; the Codex epic runner is a repo-local workflow
+layer on top of `bd` and `codex exec`.
 
 ### Optional: knowledge base integration
 

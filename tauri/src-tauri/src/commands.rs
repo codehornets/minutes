@@ -21,6 +21,7 @@ pub struct AppState {
     pub processing: Arc<AtomicBool>,
     pub processing_stage: Arc<Mutex<Option<String>>>,
     pub latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    pub activation_progress: Arc<Mutex<ActivationProgress>>,
     pub call_capture_health: Arc<Mutex<Option<crate::call_capture::CallSourceHealth>>>,
     pub completion_notifications_enabled: Arc<AtomicBool>,
     pub screen_share_hidden: Arc<AtomicBool>,
@@ -136,6 +137,31 @@ pub struct DecisionView {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct MeetingReferenceView {
+    pub path: String,
+    pub title: String,
+    pub date: String,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RelatedCommitmentView {
+    pub path: String,
+    pub title: String,
+    pub what: String,
+    pub who: Option<String>,
+    pub by_date: Option<String>,
+}
+
+struct RelatedContextView {
+    related_people: Vec<String>,
+    related_topics: Vec<String>,
+    related_meetings: Vec<MeetingReferenceView>,
+    related_commitments: Vec<RelatedCommitmentView>,
+    adjacent_artifacts: Vec<RecentArtifactView>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MeetingDetail {
     pub path: String,
     pub title: String,
@@ -148,6 +174,11 @@ pub struct MeetingDetail {
     pub calendar_event: Option<String>,
     pub action_items: Vec<ActionItemView>,
     pub decisions: Vec<DecisionView>,
+    pub related_people: Vec<String>,
+    pub related_topics: Vec<String>,
+    pub related_meetings: Vec<MeetingReferenceView>,
+    pub related_commitments: Vec<RelatedCommitmentView>,
+    pub adjacent_artifacts: Vec<RecentArtifactView>,
     pub sections: Vec<MeetingSection>,
     pub speaker_map: Vec<SpeakerAttributionView>,
 }
@@ -178,12 +209,63 @@ pub struct TextFileReview {
     pub current_preview: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RecentArtifactEntry {
+    path: String,
+    opened_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentArtifactView {
+    pub path: String,
+    pub filename: String,
+    pub kind: String,
+    pub editable: bool,
+    pub opened_at: String,
+    pub review_available: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecallWorkspaceState {
+    pub recall_expanded: bool,
+    pub recall_phase: String,
+    pub recall_ratio: f64,
+    pub current_meeting_path: Option<String>,
+    pub open_artifact_path: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OutputNotice {
     pub kind: String,
     pub title: String,
     pub path: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationProgress {
+    pub desktop_opened_at: Option<String>,
+    pub model_ready_at: Option<String>,
+    pub first_recording_started_at: Option<String>,
+    pub first_artifact_saved_at: Option<String>,
+    pub first_artifact_path: Option<String>,
+    pub next_step_nudge_shown_at: Option<String>,
+    pub next_step_nudge_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivationStatusView {
+    pub phase: String,
+    pub next_action: String,
+    pub has_model: bool,
+    pub has_saved_artifact: bool,
+    pub first_artifact_path: Option<String>,
+    pub milestones: ActivationProgress,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -203,6 +285,498 @@ pub struct RecoveryItem {
     pub retry_type: String,
 }
 
+fn activation_state_path() -> PathBuf {
+    Config::minutes_dir().join("activation-state.json")
+}
+
+fn recent_artifacts_state_path() -> PathBuf {
+    Config::minutes_dir().join("recent-artifacts.json")
+}
+
+fn recall_workspace_state_path() -> PathBuf {
+    Config::minutes_dir().join("recall-workspace.json")
+}
+
+fn now_rfc3339() -> String {
+    chrono::Local::now().to_rfc3339()
+}
+
+fn system_time_to_rfc3339(value: SystemTime) -> Option<String> {
+    let dt: chrono::DateTime<chrono::Local> = value.into();
+    Some(dt.to_rfc3339())
+}
+
+fn path_timestamp(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    metadata
+        .created()
+        .ok()
+        .and_then(system_time_to_rfc3339)
+        .or_else(|| metadata.modified().ok().and_then(system_time_to_rfc3339))
+}
+
+fn persist_activation_progress(progress: &ActivationProgress) {
+    let path = activation_state_path();
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let Ok(json) = serde_json::to_string_pretty(progress) else {
+        return;
+    };
+    let _ = std::fs::write(path, json);
+}
+
+fn load_recent_artifacts_from(path: &Path) -> Vec<RecentArtifactEntry> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<RecentArtifactEntry>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn persist_recent_artifacts_to(path: &Path, entries: &[RecentArtifactEntry]) {
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let Ok(json) = serde_json::to_string_pretty(entries) else {
+        return;
+    };
+    let _ = std::fs::write(path, json);
+}
+
+fn load_recall_workspace_state_from(path: &Path) -> RecallWorkspaceState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<RecallWorkspaceState>(&raw).ok())
+        .unwrap_or_else(|| RecallWorkspaceState {
+            recall_expanded: false,
+            recall_phase: "recall".into(),
+            recall_ratio: 0.5,
+            current_meeting_path: None,
+            open_artifact_path: None,
+        })
+}
+
+fn persist_recall_workspace_state_to(path: &Path, state: &RecallWorkspaceState) {
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let Ok(json) = serde_json::to_string_pretty(state) else {
+        return;
+    };
+    let _ = std::fs::write(path, json);
+}
+
+fn record_recent_artifact_path(path: &Path) {
+    const MAX_RECENT_ARTIFACTS: usize = 12;
+    record_recent_artifact_path_with_limit(
+        path,
+        MAX_RECENT_ARTIFACTS,
+        &recent_artifacts_state_path(),
+    );
+}
+
+fn record_recent_artifact_path_with_limit(path: &Path, max_items: usize, state_path: &Path) {
+    let canonical = match validate_text_file_path(path) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    record_recent_artifact_canonical_with_limit(&canonical, max_items, state_path);
+}
+
+fn record_recent_artifact_canonical_with_limit(
+    canonical: &Path,
+    max_items: usize,
+    state_path: &Path,
+) {
+    let canonical_string = canonical.display().to_string();
+    let mut entries = load_recent_artifacts_from(state_path);
+    entries.retain(|entry| entry.path != canonical_string);
+    entries.insert(
+        0,
+        RecentArtifactEntry {
+            path: canonical_string,
+            opened_at: now_rfc3339(),
+        },
+    );
+    entries.retain(|entry| Path::new(&entry.path).exists());
+    entries.truncate(max_items);
+    persist_recent_artifacts_to(state_path, &entries);
+}
+
+fn recent_artifact_views(
+    config: &Config,
+    limit: usize,
+    exclude_path: Option<&Path>,
+) -> Vec<RecentArtifactView> {
+    let state_path = recent_artifacts_state_path();
+    let exclude = exclude_path.map(|path| path.display().to_string());
+    let mut views = Vec::new();
+
+    for entry in load_recent_artifacts_from(&state_path).into_iter() {
+        if views.len() >= limit {
+            break;
+        }
+        if exclude.as_deref() == Some(entry.path.as_str()) {
+            continue;
+        }
+        let canonical = match validate_text_file_path(Path::new(&entry.path)) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let filename = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Artifact")
+            .to_string();
+        let kind = text_file_kind(&canonical).unwrap_or("text").to_string();
+        let editable = is_editable_text_file_path(&canonical, config);
+        let review_available = latest_snapshot_for_path(&canonical)
+            .ok()
+            .flatten()
+            .is_some();
+
+        views.push(RecentArtifactView {
+            path: canonical.display().to_string(),
+            filename,
+            kind,
+            editable,
+            opened_at: entry.opened_at,
+            review_available,
+        });
+    }
+
+    views
+}
+
+fn update_activation_progress<F>(state: &Arc<Mutex<ActivationProgress>>, mutate: F)
+where
+    F: FnOnce(&mut ActivationProgress) -> bool,
+{
+    let mut snapshot = None;
+    if let Ok(mut progress) = state.lock() {
+        if mutate(&mut progress) {
+            snapshot = Some(progress.clone());
+        }
+    }
+    if let Some(progress) = snapshot {
+        persist_activation_progress(&progress);
+    }
+}
+
+fn mark_activation_model_ready(state: &Arc<Mutex<ActivationProgress>>, model_file: &Path) {
+    let inferred = path_timestamp(model_file).unwrap_or_else(now_rfc3339);
+    update_activation_progress(state, |progress| {
+        if progress.model_ready_at.is_none() {
+            progress.model_ready_at = Some(inferred);
+            return true;
+        }
+        false
+    });
+}
+
+fn mark_activation_first_recording_started(state: &Arc<Mutex<ActivationProgress>>) {
+    update_activation_progress(state, |progress| {
+        if progress.first_recording_started_at.is_none() {
+            progress.first_recording_started_at = Some(now_rfc3339());
+            return true;
+        }
+        false
+    });
+}
+
+fn mark_activation_first_artifact_saved(
+    state: &Arc<Mutex<ActivationProgress>>,
+    artifact_path: &Path,
+) {
+    let inferred = path_timestamp(artifact_path).unwrap_or_else(now_rfc3339);
+    let path_string = artifact_path.display().to_string();
+    update_activation_progress(state, |progress| {
+        let mut changed = false;
+        if progress.first_artifact_saved_at.is_none() {
+            progress.first_artifact_saved_at = Some(inferred.clone());
+            changed = true;
+        }
+        if progress.first_artifact_path.is_none() {
+            progress.first_artifact_path = Some(path_string.clone());
+            changed = true;
+        }
+        changed
+    });
+}
+
+fn mark_activation_next_step_nudge_shown(
+    state: &Arc<Mutex<ActivationProgress>>,
+    kind: Option<&str>,
+) {
+    let kind = kind
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+    update_activation_progress(state, |progress| {
+        let mut changed = false;
+        if progress.next_step_nudge_shown_at.is_none() {
+            progress.next_step_nudge_shown_at = Some(now_rfc3339());
+            changed = true;
+        }
+        if progress.next_step_nudge_kind.is_none() {
+            if let Some(kind) = kind.clone() {
+                progress.next_step_nudge_kind = Some(kind);
+                changed = true;
+            }
+        }
+        changed
+    });
+}
+
+fn model_file_for_config(config: &Config) -> PathBuf {
+    config
+        .transcription
+        .model_path
+        .join(format!("ggml-{}.bin", config.transcription.model))
+}
+
+fn latest_saved_artifact_from_search(config: &Config) -> Option<PathBuf> {
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: None,
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+    minutes_core::search::search("", config, &filters)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|item| item.path)
+}
+
+fn backfill_activation_from_paths(
+    progress: &mut ActivationProgress,
+    model_file: &Path,
+    latest_artifact: Option<&Path>,
+) -> bool {
+    let mut changed = false;
+    if progress.model_ready_at.is_none() && model_file.exists() {
+        progress.model_ready_at = Some(path_timestamp(model_file).unwrap_or_else(now_rfc3339));
+        changed = true;
+    }
+
+    if progress.first_artifact_saved_at.is_none() {
+        if let Some(path) = latest_artifact {
+            progress.first_artifact_saved_at =
+                Some(path_timestamp(path).unwrap_or_else(now_rfc3339));
+            if progress.first_artifact_path.is_none() {
+                progress.first_artifact_path = Some(path.display().to_string());
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub fn load_activation_progress(config: &Config) -> Arc<Mutex<ActivationProgress>> {
+    let path = activation_state_path();
+    let mut progress = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ActivationProgress>(&raw).ok())
+        .unwrap_or_default();
+
+    let mut changed = false;
+
+    if progress.desktop_opened_at.is_none() {
+        progress.desktop_opened_at = Some(now_rfc3339());
+        changed = true;
+    }
+
+    let model_file = model_file_for_config(config);
+    let latest_artifact = latest_saved_artifact_from_search(config);
+    changed |=
+        backfill_activation_from_paths(&mut progress, &model_file, latest_artifact.as_deref());
+
+    if changed {
+        persist_activation_progress(&progress);
+    }
+
+    Arc::new(Mutex::new(progress))
+}
+
+fn activation_phase(
+    progress: &ActivationProgress,
+    has_model: bool,
+    has_saved_artifact: bool,
+    recording: bool,
+    processing: bool,
+) -> (&'static str, &'static str) {
+    if !has_model {
+        return ("needs-model", "download-model");
+    }
+    if progress.first_recording_started_at.is_none() {
+        return ("ready-for-first-recording", "start-first-recording");
+    }
+    if !has_saved_artifact {
+        if recording {
+            return ("recording-first-artifact", "keep-recording");
+        }
+        if processing {
+            return ("processing-first-artifact", "wait-for-first-artifact");
+        }
+        return ("ready-for-first-artifact", "start-first-recording");
+    }
+    if progress.next_step_nudge_shown_at.is_none() {
+        return ("first-artifact-saved", "show-next-step");
+    }
+    ("activated", "explore-minutes")
+}
+
+fn activation_status_view(
+    progress: &ActivationProgress,
+    has_model: bool,
+    has_saved_artifact: bool,
+    recording: bool,
+    processing: bool,
+) -> ActivationStatusView {
+    let (phase, next_action) = activation_phase(
+        progress,
+        has_model,
+        has_saved_artifact,
+        recording,
+        processing,
+    );
+    ActivationStatusView {
+        phase: phase.into(),
+        next_action: next_action.into(),
+        has_model,
+        has_saved_artifact,
+        first_artifact_path: progress.first_artifact_path.clone(),
+        milestones: progress.clone(),
+    }
+}
+
+fn build_related_context(
+    config: &Config,
+    current_path: &Path,
+    frontmatter: &minutes_core::markdown::Frontmatter,
+) -> RelatedContextView {
+    let mut related_people = frontmatter.attendees.clone();
+    for person in &frontmatter.people {
+        if !related_people.iter().any(|existing| existing == person) {
+            related_people.push(person.clone());
+        }
+    }
+    for entity in &frontmatter.entities.people {
+        if !related_people
+            .iter()
+            .any(|existing| existing == &entity.label)
+        {
+            related_people.push(entity.label.clone());
+        }
+    }
+
+    let mut related_topics = Vec::new();
+    for decision in &frontmatter.decisions {
+        if let Some(topic) = decision
+            .topic
+            .as_ref()
+            .filter(|topic| !topic.trim().is_empty())
+        {
+            if !related_topics
+                .iter()
+                .any(|existing: &String| existing == topic)
+            {
+                related_topics.push(topic.clone());
+            }
+        }
+    }
+
+    let mut related_meetings = Vec::new();
+    let mut related_meeting_paths = std::collections::HashSet::new();
+    let mut related_commitments = Vec::new();
+
+    for person in related_people.iter().take(3) {
+        if let Ok(profile) = minutes_core::search::person_profile(config, person) {
+            for meeting in profile.recent_meetings.into_iter().take(3) {
+                let meeting_path = meeting.path.display().to_string();
+                if meeting.path == current_path {
+                    continue;
+                }
+                if related_meeting_paths.insert(meeting_path.clone()) {
+                    related_meetings.push(MeetingReferenceView {
+                        path: meeting_path,
+                        title: meeting.title,
+                        date: meeting.date,
+                        content_type: meeting.content_type,
+                    });
+                }
+            }
+
+            for intent in profile.open_intents.into_iter().take(3) {
+                related_commitments.push(RelatedCommitmentView {
+                    path: intent.path.display().to_string(),
+                    title: intent.title,
+                    what: intent.what,
+                    who: intent.who,
+                    by_date: intent.by_date,
+                });
+            }
+        }
+    }
+
+    for topic in related_topics.iter().take(2) {
+        let filters = minutes_core::search::SearchFilters {
+            content_type: None,
+            since: None,
+            attendee: None,
+            intent_kind: None,
+            owner: None,
+            recorded_by: None,
+        };
+        if let Ok(report) = minutes_core::search::cross_meeting_research(topic, config, &filters) {
+            for meeting in report.recent_meetings.into_iter().take(3) {
+                let meeting_path = meeting.path.display().to_string();
+                if meeting.path == current_path {
+                    continue;
+                }
+                if related_meeting_paths.insert(meeting_path.clone()) {
+                    related_meetings.push(MeetingReferenceView {
+                        path: meeting_path,
+                        title: meeting.title,
+                        date: meeting.date,
+                        content_type: meeting.content_type,
+                    });
+                }
+            }
+
+            for intent in report.related_open_intents.into_iter().take(3) {
+                related_commitments.push(RelatedCommitmentView {
+                    path: intent.path.display().to_string(),
+                    title: intent.title,
+                    what: intent.what,
+                    who: intent.who,
+                    by_date: intent.by_date,
+                });
+            }
+        }
+    }
+
+    related_meetings.truncate(6);
+    related_commitments.truncate(6);
+
+    RelatedContextView {
+        related_people,
+        related_topics,
+        related_meetings,
+        related_commitments,
+        adjacent_artifacts: recent_artifact_views(config, 4, Some(current_path)),
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessingJobView {
@@ -218,6 +792,83 @@ pub struct ProcessingJobView {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub word_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklySummaryView {
+    pub markdown: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProactiveContextBundleView {
+    pub summary: String,
+    pub markdown: String,
+    pub recent_meeting_count: usize,
+    pub recent_memo_count: usize,
+    pub stale_commitment_count: usize,
+    pub losing_touch_count: usize,
+}
+
+fn build_weekly_summary_markdown(
+    meetings_count: usize,
+    recent_titles: &str,
+    decision_conflicts: &str,
+    stale_commitments: &str,
+    open_actions_block: &str,
+) -> String {
+    format!(
+        "# Weekly Summary\n\n## Volume\n\n- {meetings_count} meeting or memo artifact(s) in the last 7 days.\n\n## Recent Meetings\n\n{recent_titles}\n\n## Decision Arcs\n\n{decision_conflicts}\n\n## Stale Commitments\n\n{stale_commitments}\n\n## Open Actions\n\n{open_actions_block}\n\n## Monday Brief\n\n- Confirm the highest-risk open commitment.\n- Review the most important decision conflict before the next meeting.\n- Turn the most important meeting into a durable artifact if it is still only in transcript form.\n"
+    )
+}
+
+fn build_proactive_context_markdown(
+    recent_meetings: &[String],
+    recent_memos: &[String],
+    stale_commitments: &[String],
+    losing_touch: &[String],
+) -> String {
+    let meetings_block = if recent_meetings.is_empty() {
+        "- No recent meetings.".to_string()
+    } else {
+        recent_meetings
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let memos_block = if recent_memos.is_empty() {
+        "- No recent memos.".to_string()
+    } else {
+        recent_memos
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let stale_block = if stale_commitments.is_empty() {
+        "- No stale commitments.".to_string()
+    } else {
+        stale_commitments
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let touch_block = if losing_touch.is_empty() {
+        "- No losing-touch alerts.".to_string()
+    } else {
+        losing_touch
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        "# Proactive Context\n\n## Recent Meetings\n\n{meetings_block}\n\n## Recent Memos\n\n{memos_block}\n\n## Stale Commitments\n\n{stale_block}\n\n## Losing Touch\n\n{touch_block}\n"
+    )
 }
 
 fn processing_job_view(job: minutes_core::jobs::ProcessingJob) -> ProcessingJobView {
@@ -341,6 +992,11 @@ const HOTKEY_CHOICES: [(&str, &str); 3] = [
     ("CmdOrCtrl+Shift+J", "Cmd/Ctrl + Shift + J"),
     ("CmdOrCtrl+Shift+T", "Cmd/Ctrl + Shift + T"),
 ];
+const LIVE_SHORTCUT_CHOICES: [(&str, &str); 3] = [
+    ("CmdOrCtrl+Shift+L", "Cmd/Ctrl + Shift + L"),
+    ("CmdOrCtrl+Alt+L", "Cmd/Ctrl + Option/Alt + L"),
+    ("CmdOrCtrl+Shift+T", "Cmd/Ctrl + Shift + T"),
+];
 const DICTATION_SHORTCUT_CHOICES: [(&str, &str); 3] = [
     ("CmdOrCtrl+Shift+Space", "Cmd/Ctrl + Shift + Space"),
     ("CmdOrCtrl+Alt+Space", "Cmd/Ctrl + Option/Alt + Space"),
@@ -438,6 +1094,10 @@ fn palette_shortcut_choices() -> Vec<HotkeyChoice> {
     shortcut_choices(&PALETTE_SHORTCUT_CHOICES)
 }
 
+fn live_shortcut_choices() -> Vec<HotkeyChoice> {
+    shortcut_choices(&LIVE_SHORTCUT_CHOICES)
+}
+
 fn validate_shortcut(shortcut: &str, choices: &[(&str, &str)]) -> Result<String, String> {
     choices
         .iter()
@@ -461,6 +1121,23 @@ fn validate_hotkey_shortcut(shortcut: &str) -> Result<String, String> {
 
 fn validate_dictation_shortcut(shortcut: &str) -> Result<String, String> {
     validate_shortcut(shortcut, &DICTATION_SHORTCUT_CHOICES)
+}
+
+fn validate_live_shortcut(shortcut: &str) -> Result<String, String> {
+    validate_shortcut(shortcut, &LIVE_SHORTCUT_CHOICES)
+}
+
+fn validate_download_model_name(model: &str) -> Result<&str, String> {
+    const ALLOWED_MODELS: [&str; 5] = ["tiny", "base", "small", "medium", "large-v3"];
+    if ALLOWED_MODELS.contains(&model) {
+        Ok(model)
+    } else {
+        Err(format!(
+            "Unsupported model: {}. Choose one of: {}",
+            model,
+            ALLOWED_MODELS.join(", ")
+        ))
+    }
 }
 
 fn validate_palette_shortcut(shortcut: &str) -> Result<String, String> {
@@ -581,6 +1258,7 @@ fn start_native_call_recording(
     processing: &Arc<AtomicBool>,
     processing_stage: &Arc<Mutex<Option<String>>>,
     latest_output: &Arc<Mutex<Option<OutputNotice>>>,
+    activation_progress: &Arc<Mutex<ActivationProgress>>,
     call_capture_health: &Arc<Mutex<Option<crate::call_capture::CallSourceHealth>>>,
     completion_notifications_enabled: &Arc<AtomicBool>,
     hotkey_runtime: Option<&Arc<Mutex<HotkeyRuntime>>>,
@@ -751,6 +1429,7 @@ fn start_native_call_recording(
                 processing.clone(),
                 processing_stage.clone(),
                 latest_output.clone(),
+                activation_progress.clone(),
                 completion_notifications_enabled.clone(),
             );
             sync_processing_indicator(processing, processing_stage);
@@ -907,7 +1586,6 @@ fn set_call_detection_sentinel(config: &mut Config, sentinel: &str, enabled: boo
     }
 }
 
-#[cfg(test)]
 fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) -> &'static str {
     match (stage, mode) {
         (minutes_core::pipeline::PipelineStage::Transcribing, CaptureMode::Meeting) => {
@@ -938,6 +1616,19 @@ fn stage_label(stage: minutes_core::pipeline::PipelineStage, mode: CaptureMode) 
         }
         (_, CaptureMode::LiveTranscript) => "Processing live transcript",
     }
+}
+
+fn pipeline_stage_label(stage: Option<&str>, mode: Option<CaptureMode>) -> Option<&'static str> {
+    let stage = stage?;
+    let mode = mode?;
+    let parsed = match stage {
+        "transcribing" => minutes_core::pipeline::PipelineStage::Transcribing,
+        "diarizing" => minutes_core::pipeline::PipelineStage::Diarizing,
+        "summarizing" => minutes_core::pipeline::PipelineStage::Summarizing,
+        "saving" => minutes_core::pipeline::PipelineStage::Saving,
+        _ => return None,
+    };
+    Some(stage_label(parsed, mode))
 }
 
 fn set_processing_stage(stage: &Arc<Mutex<Option<String>>>, value: Option<&str>) {
@@ -1018,6 +1709,7 @@ pub fn spawn_processing_worker(
     processing: Arc<AtomicBool>,
     processing_stage: Arc<Mutex<Option<String>>>,
     latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    activation_progress: Arc<Mutex<ActivationProgress>>,
     completion_notifications_enabled: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
@@ -1027,6 +1719,12 @@ pub fn spawn_processing_worker(
 
             if let Some(notice) = output_notice_from_job(job) {
                 set_latest_output(&latest_output, Some(notice.clone()));
+                if notice.kind == "saved" {
+                    mark_activation_first_artifact_saved(
+                        &activation_progress,
+                        Path::new(&notice.path),
+                    );
+                }
                 maybe_show_completion_notification(
                     &app_handle,
                     &completion_notifications_enabled,
@@ -1527,9 +2225,9 @@ fn write_text_file_atomic(path: &Path, content: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to write temp file {}: {}", temp_path.display(), e))?;
     std::fs::rename(&temp_path, path).map_err(|e| {
         format!(
-            "Failed to atomically replace {} with {}: {}",
-            path.display(),
+            "Failed to atomically replace temp file {} with destination {}: {}",
             temp_path.display(),
+            path.display(),
             e
         )
     })
@@ -1566,9 +2264,10 @@ fn build_artifact_template(
         "follow-up-email" => format!("Follow-up Email - {}", meeting_title),
         "meeting-brief" => format!("Meeting Brief - {}", meeting_title),
         "debrief-memo" => format!("Debrief Memo - {}", meeting_title),
+        "decision-memo" => format!("Decision Memo - {}", meeting_title),
         other => {
             return Err(format!(
-            "Unknown artifact template '{}'. Use follow-up-email, meeting-brief, or debrief-memo.",
+            "Unknown artifact template '{}'. Use follow-up-email, meeting-brief, debrief-memo, or decision-memo.",
             other
         ))
         }
@@ -1635,6 +2334,9 @@ fn build_artifact_template(
         ),
         "debrief-memo" => format!(
             "# Summary\n\n{summary}\n\n## Decisions\n\n{decisions}\n\n## Action Items\n\n{action_items}\n\n## Open Questions\n\n{open_questions}\n\n## Next Move\n\n- Write the next action the team should take from this conversation.\n"
+        ),
+        "decision-memo" => format!(
+            "# Decision\n\nWrite the one decision this memo is locking in.\n\n## Why This Decision\n\n{summary}\n\n## Decision Details\n\n{decisions}\n\n## Implications\n\n- Add the operational, product, or relationship implications of this decision.\n\n## Action Items\n\n{action_items}\n\n## Open Questions / Risks\n\n{open_questions}\n"
         ),
         _ => unreachable!(),
     };
@@ -2082,6 +2784,7 @@ pub fn start_recording(
     processing: Arc<AtomicBool>,
     processing_stage: Arc<Mutex<Option<String>>>,
     latest_output: Arc<Mutex<Option<OutputNotice>>>,
+    activation_progress: Arc<Mutex<ActivationProgress>>,
     call_capture_health: Arc<Mutex<Option<crate::call_capture::CallSourceHealth>>>,
     completion_notifications_enabled: Arc<AtomicBool>,
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
@@ -2147,6 +2850,7 @@ pub fn start_recording(
             &processing,
             &processing_stage,
             &latest_output,
+            &activation_progress,
             &call_capture_health,
             &completion_notifications_enabled,
             hotkey_runtime.as_ref(),
@@ -2264,6 +2968,7 @@ pub fn start_recording(
                             processing.clone(),
                             processing_stage.clone(),
                             latest_output.clone(),
+                            activation_progress.clone(),
                             completion_notifications_enabled.clone(),
                         );
                     }
@@ -2385,9 +3090,11 @@ pub fn launch_recording(
     let processing = state.processing.clone();
     let processing_stage = state.processing_stage.clone();
     let latest_output = state.latest_output.clone();
+    let activation_progress = state.activation_progress.clone();
     let call_capture_health = state.call_capture_health.clone();
     let completion_notifications_enabled = state.completion_notifications_enabled.clone();
     let app_done = app.clone();
+    mark_activation_first_recording_started(&activation_progress);
 
     std::thread::spawn(move || {
         start_recording(
@@ -2398,6 +3105,7 @@ pub fn launch_recording(
             processing,
             processing_stage,
             latest_output,
+            activation_progress,
             call_capture_health,
             completion_notifications_enabled,
             hotkey_runtime,
@@ -2750,6 +3458,8 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .ok()
         .and_then(|stage| stage.clone())
         .or(shared_processing.stage);
+    let processing_stage_label =
+        pipeline_stage_label(processing_stage.as_deref(), status.recording_mode);
     let latest_output = state
         .latest_output
         .lock()
@@ -2764,6 +3474,25 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         .into_iter()
         .map(processing_job_view)
         .collect();
+    let config = Config::load();
+    let model_file = model_file_for_config(&config);
+    if model_file.exists() {
+        mark_activation_model_ready(&state.activation_progress, &model_file);
+    }
+    let activation_progress = state
+        .activation_progress
+        .lock()
+        .ok()
+        .map(|progress| progress.clone())
+        .unwrap_or_default();
+    let has_saved_artifact = activation_progress.first_artifact_saved_at.is_some();
+    let activation = activation_status_view(
+        &activation_progress,
+        model_file.exists(),
+        has_saved_artifact,
+        recording || (status.recording && !processing),
+        processing,
+    );
 
     // Get elapsed time if recording
     let elapsed = if recording || (status.recording && !processing) {
@@ -2801,11 +3530,13 @@ pub fn cmd_status(state: tauri::State<AppState>) -> serde_json::Value {
         "processing": processing,
         "recordingMode": status.recording_mode,
         "processingStage": processing_stage,
+        "processingStageLabel": processing_stage_label,
         "processingTitle": status.processing_title,
         "processingJobId": status.processing_job_id,
         "processingJobCount": status.processing_job_count,
         "processingJobs": processing_jobs,
         "latestOutput": latest_output,
+        "activation": activation,
         "callCaptureHealth": call_capture_health,
         "pid": status.pid,
         "elapsed": elapsed,
@@ -2846,9 +3577,196 @@ pub fn cmd_retry_processing_job(
         state.processing.clone(),
         state.processing_stage.clone(),
         state.latest_output.clone(),
+        state.activation_progress.clone(),
         state.completion_notifications_enabled.clone(),
     );
     Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
+    let config = Config::load();
+    let since = (chrono::Local::now() - chrono::Duration::days(7)).to_rfc3339();
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: Some(since.clone()),
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+
+    let meetings =
+        minutes_core::search::search("", &config, &filters).map_err(|e| e.to_string())?;
+    let consistency =
+        minutes_core::search::consistency_report(&config, None, 7).map_err(|e| e.to_string())?;
+    let open_actions =
+        minutes_core::search::find_open_actions(&config, None).map_err(|e| e.to_string())?;
+
+    let meetings_count = meetings.len();
+    let recent_titles = if meetings.is_empty() {
+        "- No meetings or memos in the last 7 days.".to_string()
+    } else {
+        meetings
+            .iter()
+            .take(6)
+            .map(|meeting| format!("- {} ({})", meeting.title, meeting.date))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let decision_conflicts = if consistency.decision_conflicts.is_empty() {
+        "- No conflicting decision arcs detected.".to_string()
+    } else {
+        consistency
+            .decision_conflicts
+            .iter()
+            .take(5)
+            .map(|conflict| format!("- {} -> {}", conflict.topic, conflict.latest.what))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let stale_commitments = if consistency.stale_commitments.is_empty() {
+        "- No stale commitments detected.".to_string()
+    } else {
+        consistency
+            .stale_commitments
+            .iter()
+            .take(5)
+            .map(|item| {
+                format!(
+                    "- {}{}",
+                    item.entry.what,
+                    item.entry
+                        .who
+                        .as_ref()
+                        .map(|who| format!(" ({})", who))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let open_actions_block = if open_actions.is_empty() {
+        "- No open action items found.".to_string()
+    } else {
+        open_actions
+            .iter()
+            .take(6)
+            .map(|item| {
+                format!(
+                    "- {}: {}{}",
+                    item.assignee,
+                    item.task,
+                    item.due
+                        .as_ref()
+                        .map(|due| format!(" (due {})", due))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let markdown = build_weekly_summary_markdown(
+        meetings_count,
+        &recent_titles,
+        &decision_conflicts,
+        &stale_commitments,
+        &open_actions_block,
+    );
+
+    Ok(WeeklySummaryView { markdown })
+}
+
+#[tauri::command]
+pub fn cmd_proactive_context_bundle() -> Result<ProactiveContextBundleView, String> {
+    let config = Config::load();
+    let since = (chrono::Local::now() - chrono::Duration::days(7)).to_rfc3339();
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: Some(since),
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+
+    let recent_results =
+        minutes_core::search::search("", &config, &filters).map_err(|e| e.to_string())?;
+    let recent_meetings: Vec<String> = recent_results
+        .iter()
+        .filter(|item| item.content_type != "memo")
+        .take(4)
+        .map(|item| format!("{} ({})", item.title, item.date))
+        .collect();
+    let recent_memos: Vec<String> = recent_results
+        .iter()
+        .filter(|item| item.content_type == "memo")
+        .take(4)
+        .map(|item| format!("{} ({})", item.title, item.date))
+        .collect();
+
+    let consistency =
+        minutes_core::search::consistency_report(&config, None, 7).map_err(|e| e.to_string())?;
+    let stale_commitments: Vec<String> = consistency
+        .stale_commitments
+        .iter()
+        .take(4)
+        .map(|item| {
+            format!(
+                "{}{}",
+                item.entry.what,
+                item.entry
+                    .who
+                    .as_ref()
+                    .map(|who| format!(" ({who})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
+
+    let losing_touch = minutes_core::graph::relationship_map(&config)
+        .map(|people| {
+            people
+                .into_iter()
+                .filter(|person| person.losing_touch)
+                .take(4)
+                .map(|person| {
+                    format!(
+                        "{} (last {}d ago)",
+                        person.name,
+                        person.days_since.round() as i64
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let summary = format!(
+        "{} meetings · {} memos · {} stale commitments · {} losing-touch alerts",
+        recent_meetings.len(),
+        recent_memos.len(),
+        stale_commitments.len(),
+        losing_touch.len()
+    );
+    let markdown = build_proactive_context_markdown(
+        &recent_meetings,
+        &recent_memos,
+        &stale_commitments,
+        &losing_touch,
+    );
+
+    Ok(ProactiveContextBundleView {
+        summary,
+        markdown,
+        recent_meeting_count: recent_meetings.len(),
+        recent_memo_count: recent_memos.len(),
+        stale_commitment_count: stale_commitments.len(),
+        losing_touch_count: losing_touch.len(),
+    })
 }
 
 /// Scan ~/.minutes/preps/ for existing prep files and return a set of
@@ -3142,8 +4060,67 @@ pub fn cmd_get_text_file_review(path: String) -> Result<TextFileReview, String> 
 }
 
 #[tauri::command]
+pub fn cmd_recent_artifacts(limit: Option<usize>) -> serde_json::Value {
+    let config = Config::load();
+    let views = recent_artifact_views(&config, limit.unwrap_or(8), None);
+    serde_json::to_value(views).unwrap_or_else(|_| serde_json::json!([]))
+}
+
+#[tauri::command]
+pub fn cmd_get_recall_workspace_state() -> serde_json::Value {
+    serde_json::to_value(load_recall_workspace_state_from(
+        &recall_workspace_state_path(),
+    ))
+    .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+#[tauri::command]
+pub fn cmd_set_recall_workspace_state(
+    recall_expanded: Option<bool>,
+    recall_phase: Option<String>,
+    recall_ratio: Option<f64>,
+    current_meeting_path: Option<String>,
+    open_artifact_path: Option<String>,
+) -> Result<(), String> {
+    let state_path = recall_workspace_state_path();
+    let mut state = load_recall_workspace_state_from(&state_path);
+
+    if let Some(value) = recall_expanded {
+        state.recall_expanded = value;
+    }
+    if let Some(value) = recall_phase {
+        state.recall_phase = if value.trim().is_empty() {
+            "recall".into()
+        } else {
+            value
+        };
+    }
+    if let Some(value) = recall_ratio {
+        state.recall_ratio = value.clamp(0.25, 0.75);
+    }
+    if let Some(value) = current_meeting_path {
+        state.current_meeting_path = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
+    }
+    if let Some(value) = open_artifact_path {
+        state.open_artifact_path = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
+    }
+
+    persist_recall_workspace_state_to(&state_path, &state);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn cmd_set_open_artifact(state: tauri::State<AppState>, path: String) -> Result<(), String> {
     let canonical = validate_text_file_path(Path::new(&path))?;
+    record_recent_artifact_path(&canonical);
     let config = Config::load();
     let workspace = crate::context::create_workspace(&config)?;
     crate::context::write_assistant_context(&workspace, &config)?;
@@ -3461,6 +4438,8 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
         })
         .collect();
 
+    let related = build_related_context(&config, &meeting_path, &frontmatter);
+
     Ok(MeetingDetail {
         path,
         title: frontmatter.title,
@@ -3473,6 +4452,11 @@ pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
         calendar_event: frontmatter.calendar_event,
         action_items,
         decisions,
+        related_people: related.related_people,
+        related_topics: related.related_topics,
+        related_meetings: related.related_meetings,
+        related_commitments: related.related_commitments,
+        adjacent_artifacts: related.adjacent_artifacts,
         sections: parse_sections(body),
         speaker_map,
     })
@@ -3676,33 +4660,55 @@ pub async fn cmd_upcoming_meetings() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn cmd_needs_setup() -> serde_json::Value {
+pub fn cmd_needs_setup(state: tauri::State<AppState>) -> serde_json::Value {
     let config = Config::load();
     let model_name = &config.transcription.model;
-    let model_dir = &config.transcription.model_path;
-    let model_file = model_dir.join(format!("ggml-{}.bin", model_name));
+    let model_file = model_file_for_config(&config);
     let has_model = model_file.exists();
+    if has_model {
+        mark_activation_model_ready(&state.activation_progress, &model_file);
+    }
 
     let meetings_dir = config.output_dir.clone();
     let has_meetings_dir = meetings_dir.exists();
+    let activation_progress = state
+        .activation_progress
+        .lock()
+        .ok()
+        .map(|progress| progress.clone())
+        .unwrap_or_default();
 
     serde_json::json!({
         "needsSetup": !has_model,
         "hasModel": has_model,
         "modelName": model_name,
         "hasMeetingsDir": has_meetings_dir,
+        "activation": activation_status_view(
+            &activation_progress,
+            has_model,
+            activation_progress.first_artifact_saved_at.is_some(),
+            false,
+            false,
+        ),
     })
 }
 
 #[tauri::command]
-pub async fn cmd_download_model(model: String) -> Result<String, String> {
+pub async fn cmd_download_model(
+    state: tauri::State<'_, AppState>,
+    model: String,
+) -> Result<String, String> {
     // Run in a blocking thread so the UI stays responsive during download
+    let activation_progress = state.activation_progress.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        validate_download_model_name(&model)?;
+
         let config = Config::load();
         let model_dir = &config.transcription.model_path;
         let model_file = model_dir.join(format!("ggml-{}.bin", model));
 
         if model_file.exists() {
+            mark_activation_model_ready(&activation_progress, &model_file);
             return Ok(format!("Model '{}' already downloaded", model));
         }
 
@@ -3733,11 +4739,17 @@ pub async fn cmd_download_model(model: String) -> Result<String, String> {
         let size = std::fs::metadata(&model_file)
             .map(|m| m.len() / (1024 * 1024))
             .unwrap_or(0);
+        mark_activation_model_ready(&activation_progress, &model_file);
 
         Ok(format!("Downloaded '{}' model ({} MB)", model, size))
     })
     .await
     .map_err(|e| format!("Download task failed: {}", e))?
+}
+
+#[tauri::command]
+pub fn cmd_mark_activation_nudge_shown(state: tauri::State<AppState>, kind: Option<String>) {
+    mark_activation_next_step_nudge_shown(&state.activation_progress, kind.as_deref());
 }
 
 // ── Terminal / AI Assistant commands ──────────────────────────
@@ -4473,6 +5485,76 @@ mod tests {
     }
 
     #[test]
+    fn activation_phase_guides_new_user_to_download_model_first() {
+        let progress = ActivationProgress::default();
+        let (phase, action) = activation_phase(&progress, false, false, false, false);
+
+        assert_eq!(phase, "needs-model");
+        assert_eq!(action, "download-model");
+    }
+
+    #[test]
+    fn activation_phase_guides_user_to_first_recording_after_model_ready() {
+        let progress = ActivationProgress {
+            model_ready_at: Some("2026-04-09T12:00:00-07:00".into()),
+            ..ActivationProgress::default()
+        };
+        let (phase, action) = activation_phase(&progress, true, false, false, false);
+
+        assert_eq!(phase, "ready-for-first-recording");
+        assert_eq!(action, "start-first-recording");
+    }
+
+    #[test]
+    fn activation_phase_reports_processing_until_first_artifact_finishes() {
+        let progress = ActivationProgress {
+            model_ready_at: Some("2026-04-09T12:00:00-07:00".into()),
+            first_recording_started_at: Some("2026-04-09T12:01:00-07:00".into()),
+            ..ActivationProgress::default()
+        };
+        let (phase, action) = activation_phase(&progress, true, false, false, true);
+
+        assert_eq!(phase, "processing-first-artifact");
+        assert_eq!(action, "wait-for-first-artifact");
+    }
+
+    #[test]
+    fn activation_phase_requires_next_step_nudge_after_first_artifact() {
+        let progress = ActivationProgress {
+            model_ready_at: Some("2026-04-09T12:00:00-07:00".into()),
+            first_recording_started_at: Some("2026-04-09T12:01:00-07:00".into()),
+            first_artifact_saved_at: Some("2026-04-09T12:02:00-07:00".into()),
+            first_artifact_path: Some("/tmp/demo.md".into()),
+            ..ActivationProgress::default()
+        };
+        let (phase, action) = activation_phase(&progress, true, true, false, false);
+
+        assert_eq!(phase, "first-artifact-saved");
+        assert_eq!(action, "show-next-step");
+    }
+
+    #[test]
+    fn backfill_activation_from_paths_populates_missing_model_and_artifact_milestones() {
+        let temp = TempDir::new().unwrap();
+        let model = temp.path().join("ggml-small.bin");
+        let artifact = temp.path().join("2026-04-09-demo.md");
+        std::fs::write(&model, "model").unwrap();
+        std::fs::write(&artifact, "---\ntitle: Demo\n---\n").unwrap();
+
+        let mut progress = ActivationProgress::default();
+        let changed = backfill_activation_from_paths(&mut progress, &model, Some(&artifact));
+        let expected = artifact.display().to_string();
+
+        assert!(changed);
+        assert!(progress.model_ready_at.is_some());
+        assert!(progress.first_artifact_saved_at.is_some());
+        assert_eq!(
+            progress.first_artifact_path.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
     fn build_artifact_template_includes_meeting_metadata() {
         let fm = minutes_core::markdown::Frontmatter {
             title: "Pricing Review".into(),
@@ -4523,6 +5605,276 @@ mod tests {
         assert!(body.contains("source_meeting: /tmp/pricing-review.md"));
         assert!(body.contains("Ship the new pricing page"));
         assert!(body.contains("Mat: Send follow-up"));
+    }
+
+    #[test]
+    fn build_decision_memo_template_includes_decision_sections() {
+        let fm = minutes_core::markdown::Frontmatter {
+            title: "Pricing Review".into(),
+            r#type: ContentType::Meeting,
+            date: chrono::Local::now(),
+            duration: "30m".into(),
+            source: None,
+            status: Some(minutes_core::markdown::OutputStatus::Complete),
+            tags: vec![],
+            attendees: vec!["Mat".into(), "Alex".into()],
+            attendees_raw: None,
+            calendar_event: None,
+            people: vec![],
+            entities: minutes_core::markdown::EntityLinks::default(),
+            device: None,
+            captured_at: None,
+            context: None,
+            action_items: vec![minutes_core::markdown::ActionItem {
+                assignee: "Mat".into(),
+                task: "Send follow-up".into(),
+                due: Some("Friday".into()),
+                status: "open".into(),
+            }],
+            decisions: vec![minutes_core::markdown::Decision {
+                text: "Ship the new pricing page".into(),
+                topic: Some("pricing".into()),
+            }],
+            intents: vec![],
+            recorded_by: None,
+            visibility: None,
+            speaker_map: vec![],
+            filter_diagnosis: None,
+        };
+        let sections = vec![MeetingSection {
+            heading: "Summary".into(),
+            content: "- We aligned on pricing changes.".into(),
+        }];
+
+        let (title, body) = build_artifact_template(
+            &fm,
+            &sections,
+            Path::new("/tmp/pricing-review.md"),
+            "decision-memo",
+        )
+        .unwrap();
+
+        assert!(title.contains("Decision Memo"));
+        assert!(body.contains("# Decision"));
+        assert!(body.contains("## Decision Details"));
+        assert!(body.contains("## Implications"));
+        assert!(body.contains("Ship the new pricing page"));
+    }
+
+    #[test]
+    fn starter_artifact_pack_templates_all_build() {
+        let fm = minutes_core::markdown::Frontmatter {
+            title: "Pricing Review".into(),
+            r#type: ContentType::Meeting,
+            date: chrono::Local::now(),
+            duration: "30m".into(),
+            source: None,
+            status: Some(minutes_core::markdown::OutputStatus::Complete),
+            tags: vec![],
+            attendees: vec!["Mat".into(), "Alex".into()],
+            attendees_raw: None,
+            calendar_event: None,
+            people: vec![],
+            entities: minutes_core::markdown::EntityLinks::default(),
+            device: None,
+            captured_at: None,
+            context: None,
+            action_items: vec![],
+            decisions: vec![],
+            intents: vec![],
+            recorded_by: None,
+            visibility: None,
+            speaker_map: vec![],
+            filter_diagnosis: None,
+        };
+        let sections = vec![MeetingSection {
+            heading: "Summary".into(),
+            content: "- We aligned on pricing changes.".into(),
+        }];
+
+        for kind in [
+            "debrief-memo",
+            "follow-up-email",
+            "meeting-brief",
+            "decision-memo",
+        ] {
+            let (_title, body) =
+                build_artifact_template(&fm, &sections, Path::new("/tmp/pricing-review.md"), kind)
+                    .unwrap_or_else(|error| panic!("template {kind} failed: {error}"));
+            assert!(body.contains("source_meeting: /tmp/pricing-review.md"));
+        }
+    }
+
+    #[test]
+    fn record_recent_artifact_path_keeps_latest_entry_first_and_deduplicated() {
+        let temp = TempDir::new().unwrap();
+        let a = temp.path().join("artifact-a.md");
+        let b = temp.path().join("artifact-b.md");
+        std::fs::write(&a, "# A").unwrap();
+        std::fs::write(&b, "# B").unwrap();
+        let state_path = temp.path().join(".minutes/recent-artifacts.json");
+
+        record_recent_artifact_canonical_with_limit(&a, 4, &state_path);
+        record_recent_artifact_canonical_with_limit(&b, 4, &state_path);
+        record_recent_artifact_canonical_with_limit(&a, 4, &state_path);
+
+        let entries = load_recent_artifacts_from(&state_path);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, a.display().to_string());
+        assert_eq!(entries[1].path, b.display().to_string());
+    }
+
+    #[test]
+    fn record_recent_artifact_path_prunes_to_limit() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".minutes/recent-artifacts.json");
+
+        for idx in 0..5 {
+            let path = temp.path().join(format!("artifact-{idx}.md"));
+            std::fs::write(&path, format!("# {idx}")).unwrap();
+            record_recent_artifact_canonical_with_limit(&path, 3, &state_path);
+        }
+
+        let entries = load_recent_artifacts_from(&state_path);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].path.ends_with("artifact-4.md"));
+        assert!(entries[2].path.ends_with("artifact-2.md"));
+    }
+
+    #[test]
+    fn recall_workspace_state_round_trips() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".minutes/recall-workspace.json");
+        let state = RecallWorkspaceState {
+            recall_expanded: true,
+            recall_phase: "debrief".into(),
+            recall_ratio: 0.61,
+            current_meeting_path: Some("/tmp/meeting.md".into()),
+            open_artifact_path: Some("/tmp/artifact.md".into()),
+        };
+
+        persist_recall_workspace_state_to(&state_path, &state);
+        let restored = load_recall_workspace_state_from(&state_path);
+
+        assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn recall_workspace_state_defaults_when_missing() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join(".minutes/missing.json");
+
+        let restored = load_recall_workspace_state_from(&state_path);
+
+        assert!(!restored.recall_expanded);
+        assert_eq!(restored.recall_phase, "recall");
+        assert_eq!(restored.recall_ratio, 0.5);
+        assert_eq!(restored.current_meeting_path, None);
+        assert_eq!(restored.open_artifact_path, None);
+    }
+
+    #[test]
+    fn build_related_context_collects_people_topics_meetings_and_commitments() {
+        let temp = TempDir::new().unwrap();
+        let meetings = temp.path().join("meetings");
+        std::fs::create_dir_all(&meetings).unwrap();
+        let current = meetings.join("2026-03-17-pricing-review.md");
+        let followup = meetings.join("2026-03-20-follow-up.md");
+
+        std::fs::write(
+            &current,
+            "---\ntitle: Pricing Review\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\nattendees: [Alex]\npeople: []\naction_items: []\ndecisions:\n  - text: Launch pricing at monthly billing per month\n    topic: pricing\nintents: []\n---\n\n## Transcript\n\nWe discussed pricing.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &followup,
+            "---\ntitle: Follow-up\ntype: meeting\ndate: 2026-03-20T12:00:00-07:00\nduration: 30m\nstatus: complete\nattendees: [Alex]\npeople: []\naction_items: []\ndecisions: []\nintents:\n  - kind: commitment\n    what: Share revised pricing model\n    who: Alex\n    status: open\n    by_date: Tuesday\n---\n\n## Transcript\n\nWe followed up on pricing.\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            output_dir: meetings.clone(),
+            ..Config::default()
+        };
+        let frontmatter: minutes_core::markdown::Frontmatter = serde_yaml::from_str(
+            "title: Pricing Review\ntype: meeting\ndate: 2026-03-17T12:00:00-07:00\nduration: 42m\nstatus: complete\nattendees: [Alex]\npeople: []\naction_items: []\ndecisions:\n  - text: Launch pricing at monthly billing per month\n    topic: pricing\nintents: []\n",
+        )
+        .unwrap();
+
+        let related = build_related_context(&config, &current, &frontmatter);
+
+        assert!(related.related_people.iter().any(|person| person == "Alex"));
+        assert!(related
+            .related_topics
+            .iter()
+            .any(|topic| topic == "pricing"));
+        assert!(related
+            .related_meetings
+            .iter()
+            .any(|meeting| meeting.title == "Follow-up"));
+        assert!(related
+            .related_commitments
+            .iter()
+            .any(|commitment| commitment.what.contains("Share revised pricing model")));
+    }
+
+    #[test]
+    fn build_related_context_links_memo_to_related_meeting() {
+        let temp = TempDir::new().unwrap();
+        let meetings = temp.path().join("meetings");
+        let memos = meetings.join("memos");
+        std::fs::create_dir_all(&memos).unwrap();
+        let current = memos.join("2026-03-19-pricing-idea.md");
+        let related_meeting = meetings.join("2026-03-20-pricing-review.md");
+
+        std::fs::write(
+            &current,
+            "---\ntitle: Pricing Idea\ntype: memo\ndate: 2026-03-19T12:00:00-07:00\nduration: 2m\nstatus: complete\ntags:\n  - memo\n  - topic:pricing-strategy\nattendees: [Alex]\npeople: [Alex]\naction_items: []\ndecisions:\n  - text: Explore premium annual billing\n    topic: pricing strategy\nintents: []\n---\n\n## Transcript\n\nVoice memo about pricing.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &related_meeting,
+            "---\ntitle: Pricing Review\ntype: meeting\ndate: 2026-03-20T12:00:00-07:00\nduration: 30m\nstatus: complete\nattendees: [Alex]\npeople: []\naction_items: []\ndecisions:\n  - text: Launch pricing at monthly billing per month\n    topic: pricing strategy\nintents: []\n---\n\n## Transcript\n\nWe discussed pricing.\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            output_dir: meetings.clone(),
+            ..Config::default()
+        };
+        let frontmatter: minutes_core::markdown::Frontmatter = serde_yaml::from_str(
+            "title: Pricing Idea\ntype: memo\ndate: 2026-03-19T12:00:00-07:00\nduration: 2m\nstatus: complete\ntags:\n  - memo\n  - topic:pricing-strategy\nattendees: [Alex]\npeople: [Alex]\naction_items: []\ndecisions:\n  - text: Explore premium annual billing\n    topic: pricing strategy\nintents: []\n",
+        )
+        .unwrap();
+
+        let related = build_related_context(&config, &current, &frontmatter);
+
+        assert!(related
+            .related_meetings
+            .iter()
+            .any(|meeting| meeting.title == "Pricing Review"));
+        assert!(related
+            .related_topics
+            .iter()
+            .any(|topic| topic == "pricing strategy"));
+    }
+
+    #[test]
+    fn build_weekly_summary_markdown_includes_core_sections() {
+        let markdown = build_weekly_summary_markdown(
+            3,
+            "- Pricing Review\n- Follow-up",
+            "- pricing -> Launch monthly billing",
+            "- Share revised pricing model (Alex)",
+            "- Alex: Send updated doc",
+        );
+
+        assert!(markdown.contains("# Weekly Summary"));
+        assert!(markdown.contains("## Recent Meetings"));
+        assert!(markdown.contains("## Decision Arcs"));
+        assert!(markdown.contains("## Stale Commitments"));
+        assert!(markdown.contains("## Open Actions"));
+        assert!(markdown.contains("## Monday Brief"));
     }
 
     #[test]
@@ -4729,6 +6081,30 @@ mod tests {
         // dropped on purpose. Both should be rejected.
         assert!(validate_palette_shortcut("CmdOrCtrl+Shift+P").is_err());
         assert!(validate_palette_shortcut("CmdOrCtrl+Alt+Space").is_err());
+    }
+
+    #[test]
+    fn validate_live_shortcut_accepts_known_values() {
+        assert_eq!(
+            validate_live_shortcut("CmdOrCtrl+Shift+L").unwrap(),
+            "CmdOrCtrl+Shift+L"
+        );
+        assert_eq!(
+            validate_live_shortcut("CmdOrCtrl+Alt+L").unwrap(),
+            "CmdOrCtrl+Alt+L"
+        );
+    }
+
+    #[test]
+    fn validate_live_shortcut_rejects_unknown_values() {
+        assert!(validate_live_shortcut("CmdOrCtrl+Shift+M").is_err());
+        assert!(validate_live_shortcut("nonsense").is_err());
+    }
+
+    #[test]
+    fn validate_download_model_name_rejects_path_like_input() {
+        assert!(validate_download_model_name("../../.ssh/evil").is_err());
+        assert!(validate_download_model_name("tiny").is_ok());
     }
 
     #[test]
@@ -5129,7 +6505,7 @@ pub fn cmd_live_shortcut_settings(state: tauri::State<AppState>) -> HotkeySettin
     HotkeySettings {
         enabled,
         shortcut,
-        choices: vec![],
+        choices: live_shortcut_choices(),
     }
 }
 
@@ -5142,7 +6518,7 @@ pub fn cmd_set_live_shortcut(
 ) -> Result<HotkeySettings, String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-    let next_shortcut = validate_hotkey_shortcut(&shortcut)?;
+    let next_shortcut = validate_live_shortcut(&shortcut)?;
     let previous = cmd_live_shortcut_settings(state.clone());
     let manager = app.global_shortcut();
 

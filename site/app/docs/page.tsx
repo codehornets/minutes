@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PublicFooter } from "@/components/public-footer";
+import surfaces from "@/lib/product-surfaces.json";
 
 export const metadata: Metadata = {
   title: "Minutes docs",
@@ -60,6 +61,12 @@ const docsSections = [
   {
     label: "Guides and compare",
     links: [
+      {
+        title: "Dojo",
+        href: "/dojo",
+        blurb:
+          "Starter workflow packs and generated skill metadata for discovering the Minutes skill ecosystem.",
+      },
       {
         title: "Compare hub",
         href: "/compare",
@@ -123,6 +130,32 @@ export default function DocsIndexPage() {
       </section>
 
       <section className="mt-12 space-y-12">
+        <div>
+          <SectionLabel label="Choose your surface" />
+          <div className="grid gap-4">
+            {surfaces.map((surface) => (
+              <div
+                key={surface.name}
+                className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
+              >
+                <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+                  {surface.name}
+                </p>
+                <p className="mt-3 text-[15px] leading-8 text-[var(--text-secondary)]">
+                  <span className="font-medium text-[var(--text)]">When:</span>{" "}
+                  {surface.when}
+                </p>
+                <p className="mt-2 font-mono text-[12px] text-[var(--text)]">
+                  {surface.install}
+                </p>
+                <p className="mt-2 text-[15px] leading-8 text-[var(--text-secondary)]">
+                  {surface.note}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {docsSections.map((section) => (
           <div key={section.label}>
             <SectionLabel label={section.label} />

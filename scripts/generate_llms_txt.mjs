@@ -10,6 +10,7 @@ const manifestPath = join(repoRoot, "manifest.json");
 const mcpSourcePath = join(repoRoot, "crates", "mcp", "src", "index.ts");
 const llmsPath = join(repoRoot, "site", "public", "llms.txt");
 const llmsFullPath = join(repoRoot, "site", "public", "llms-full.txt");
+const productSurfacesPath = join(repoRoot, "site", "lib", "product-surfaces.json");
 const mcpToolsMarkdownPath = join(repoRoot, "site", "public", "docs", "mcp", "tools.md");
 const mcpToolsDataPath = join(repoRoot, "site", "app", "docs", "mcp", "tools", "data.json");
 const errorsMarkdownPath = join(repoRoot, "site", "public", "docs", "errors.md");
@@ -236,7 +237,7 @@ function categorizePrompt(name) {
   return "Other";
 }
 
-function buildLlmsTxt({ manifest, resources }) {
+function buildLlmsTxt({ manifest, resources, surfaces }) {
   const generatedOn = new Date().toISOString().slice(0, 10);
   const installCommand = "npx minutes-mcp";
   const longDescription = manifest.long_description.split("\n\n")[0].trim();
@@ -261,6 +262,12 @@ function buildLlmsTxt({ manifest, resources }) {
         `- \`${prompt.name}\` — ${prompt.description} Docs: ${mcpToolsBaseUrl}#prompt-${anchorSlug(prompt.name)}`
     )
     .join("\n");
+  const surfaceLines = surfaces
+    .map(
+      (surface) =>
+        `- ${surface.name} — When: ${surface.when} Install: \`${surface.install}\` Best for: ${surface.activation}`
+    )
+    .join("\n");
 
   return `# minutes
 
@@ -283,6 +290,10 @@ ${longDescription}
 ## For AI Agents
 
 minutes exposes a standard MCP server with ${manifest.tools.length} tools, ${resources.length} resources, and ${manifest.prompts.length} prompt templates. Any MCP-compatible client can use it as a conversation memory layer.
+
+## Choose Your Surface
+
+${surfaceLines}
 
 Recommended install:
 
@@ -358,7 +369,7 @@ decisions:
 `;
 }
 
-function buildLlmsFull({ manifest, resources }) {
+function buildLlmsFull({ manifest, resources, surfaces }) {
   const generatedOn = new Date().toISOString().slice(0, 10);
   const toolLines = manifest.tools
     .map(
@@ -372,6 +383,12 @@ function buildLlmsFull({ manifest, resources }) {
         `- \`${resource.uri}\` — ${resource.description} Docs: ${mcpToolsBaseUrl}#resource-${anchorSlug(resource.name)}`
     )
     .join("\n");
+  const surfaceLines = surfaces
+    .map(
+      (surface) =>
+        `- ${surface.name}\n  - When: ${surface.when}\n  - Install: \`${surface.install}\`\n  - Best for: ${surface.activation}\n  - Notes: ${surface.note}`
+    )
+    .join("\n");
 
   return `# minutes — full agent reference
 
@@ -382,6 +399,10 @@ function buildLlmsFull({ manifest, resources }) {
 ## Product
 
 ${manifest.long_description}
+
+## Choose your surface
+
+${surfaceLines}
 
 ## Canonical entry points
 
@@ -616,6 +637,7 @@ async function main() {
   const checkMode = process.argv.includes("--check");
 
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const surfaces = JSON.parse(await readFile(productSurfacesPath, "utf8"));
   const mcpSource = await readFile(mcpSourcePath, "utf8");
   const resources = parseResources(mcpSource);
   const errorEntries = (await parseErrorCatalog()).map(classifyErrorEntry);
@@ -652,8 +674,8 @@ async function main() {
     );
   }
 
-  const next = buildLlmsTxt({ manifest, resources });
-  const nextFull = buildLlmsFull({ manifest, resources });
+  const next = buildLlmsTxt({ manifest, resources, surfaces });
+  const nextFull = buildLlmsFull({ manifest, resources, surfaces });
   const nextMcpToolsMarkdown = buildMcpToolsMarkdown({ manifest, resources });
   const nextMcpToolsData = buildMcpToolsData({ manifest, resources });
   const nextErrorsMarkdown = buildErrorsMarkdown(errorEntries);

@@ -319,6 +319,7 @@
       animation: recording-glow 1.8s ease-in-out infinite;
     }
     .recall-phase-dot.debrief { background: var(--green); }
+    .recall-phase-dot.weekly { background: var(--accent-2); }
 
     .recall-phase-label {
       font-size: 12px;
@@ -330,6 +331,7 @@
     .recall-phase-label.prep { color: var(--accent); }
     .recall-phase-label.listening { color: var(--red); }
     .recall-phase-label.debrief { color: var(--green); }
+    .recall-phase-label.weekly { color: var(--accent-2); }
 
     .recall-context-label {
       font-size: 12px;
@@ -344,6 +346,27 @@
       gap: 8px;
       -webkit-app-region: no-drag;
       flex-shrink: 0;
+    }
+
+    .recall-weekly-view {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      margin: 6px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 16px;
+    }
+    .recall-weekly-view.active { display: block; }
+    .recall-weekly-view pre {
+      margin: 0;
+      white-space: pre-wrap;
+      font-family: 'Geist Mono', 'SF Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary);
     }
 
     .recall-close {
@@ -1273,6 +1296,50 @@
       flex-direction: column;
     }
     .md-viewer-review.active { display: flex; }
+    .md-viewer-history {
+      display: none;
+      gap: 10px;
+      overflow-x: auto;
+      padding: 10px 18px 0;
+    }
+    .md-viewer-history.active { display: flex; }
+    .md-viewer-history-item {
+      min-width: 190px;
+      max-width: 240px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .md-viewer-history-item.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+    }
+    .md-viewer-history-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--fg);
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .md-viewer-history-meta {
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      line-height: 1.4;
+    }
+    .md-viewer-history-open {
+      align-self: flex-start;
+      font-size: 11px;
+      padding: 4px 8px;
+    }
     .md-viewer-review-head {
       display: flex;
       justify-content: space-between;
@@ -1816,6 +1883,26 @@
       font-size: 13px;
       line-height: 1.45;
       color: var(--text-secondary);
+    }
+    .detail-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .detail-chip-btn {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      line-height: 1.3;
+      cursor: pointer;
+    }
+    .detail-chip-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
     }
 
     .detail-action-check {
@@ -2601,6 +2688,35 @@
 
     .upcoming .btn { flex-shrink: 0; }
 
+    .ambient-context-card {
+      margin: 10px 0 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ambient-context-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+    }
+    .ambient-context-summary {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+    }
+    .ambient-context-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     /* ── Call detected banner ── */
     .call-detected {
       display: none;
@@ -2997,6 +3113,7 @@
         <span class="md-viewer-status" id="md-viewer-status">Viewing</span>
       </div>
     </div>
+    <div class="md-viewer-history" id="md-viewer-history"></div>
     <div class="md-viewer-review" id="md-viewer-review">
       <div class="md-viewer-review-head">
         <div class="md-viewer-review-title">Last Change Review</div>
@@ -3058,6 +3175,7 @@
         <span class="recall-context-label" id="recall-context-label"></span>
       </div>
       <div class="recall-header-actions">
+        <button class="btn btn-secondary btn-sm" id="btn-recall-weekly">Weekly</button>
         <button class="btn btn-secondary btn-sm recall-end-btn" id="btn-recall-end">End Session</button>
         <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
       </div>
@@ -3071,6 +3189,9 @@
   <div class="recall-status" id="recall-loading">
       <div class="processing-spinner" aria-hidden="true"></div>
       <span>Starting Recall...</span>
+    </div>
+    <div class="recall-weekly-view" id="recall-weekly-view">
+      <pre id="recall-weekly-content">Loading weekly summary…</pre>
     </div>
     <div class="recall-terminal hidden" id="recall-terminal-container"></div>
     <div class="recall-exit-banner" id="recall-exit-banner">
@@ -3118,6 +3239,10 @@
         <button class="artifact-template-option" data-artifact-kind="meeting-brief">
           <span class="artifact-template-option-title">Meeting Brief</span>
           <span class="artifact-template-option-body">A prep doc for the next conversation, with context, prior decisions, open questions, and a suggested agenda.</span>
+        </button>
+        <button class="artifact-template-option" data-artifact-kind="decision-memo">
+          <span class="artifact-template-option-title">Decision Memo</span>
+          <span class="artifact-template-option-body">A crisp memo that locks in one decision, why it was made, the implications, and the actions that follow.</span>
         </button>
       </div>
       <div class="artifact-template-actions">
@@ -3781,6 +3906,8 @@
     let currentMeetingDetail = null;
     let activeSearchQuery = '';
     let currentSetup = null;
+    let activationState = null;
+    let proactiveContextBundle = null;
     let latestOutput = null;
     let detailFeedbackTimer = null;
     let processingJobs = [];
@@ -3860,6 +3987,103 @@
         aboutTrayCopy.textContent = desktopCapabilities.supportsTrayArtifactCopy
           ? 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. Power-user tray actions copy the latest summary or transcript and try to paste it into your previous app when macOS automation allows it.'
           : 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. This desktop build focuses on recording, transcription, search, and Recall today; tray copy/paste automation remains macOS-only for now.';
+      }
+    }
+
+    async function markActivationNudgeShown(kind) {
+      try {
+        await invoke('cmd_mark_activation_nudge_shown', { kind });
+      } catch (e) {
+        console.error('Activation nudge marker:', e);
+      }
+    }
+
+    async function loadProactiveContextBundle() {
+      try {
+        proactiveContextBundle = await invoke('cmd_proactive_context_bundle');
+      } catch (e) {
+        console.error('Proactive context bundle:', e);
+        proactiveContextBundle = null;
+      }
+    }
+
+    function appendProactiveContextCard() {
+      if (!proactiveContextBundle) return;
+      const total =
+        (proactiveContextBundle.recentMeetingCount || 0) +
+        (proactiveContextBundle.recentMemoCount || 0) +
+        (proactiveContextBundle.staleCommitmentCount || 0) +
+        (proactiveContextBundle.losingTouchCount || 0);
+      if (total === 0) return;
+
+      const card = document.createElement('div');
+      card.className = 'ambient-context-card';
+
+      const title = document.createElement('div');
+      title.className = 'ambient-context-title';
+      title.textContent = 'Ambient Context';
+
+      const summary = document.createElement('div');
+      summary.className = 'ambient-context-summary';
+      summary.textContent = proactiveContextBundle.summary || 'Recent context is available.';
+
+      const actions = document.createElement('div');
+      actions.className = 'ambient-context-actions';
+
+      const recallBtn = document.createElement('button');
+      recallBtn.className = 'btn btn-secondary btn-sm';
+      recallBtn.textContent = 'Open Recall';
+      recallBtn.addEventListener('click', () => {
+        openRecall('assistant');
+      });
+
+      const weeklyBtn = document.createElement('button');
+      weeklyBtn.className = 'btn btn-secondary btn-sm';
+      weeklyBtn.textContent = 'Weekly';
+      weeklyBtn.addEventListener('click', () => {
+        openWeeklyPhase();
+      });
+
+      actions.appendChild(recallBtn);
+      actions.appendChild(weeklyBtn);
+
+      card.appendChild(title);
+      card.appendChild(summary);
+      card.appendChild(actions);
+      meetingsScroll.appendChild(card);
+    }
+
+    function applyActivationState(root, activation) {
+      if (!root || !activation) return;
+      const milestones = activation.milestones || {};
+      const modelStep = root.querySelector('#step-model');
+      const modelStatus = root.querySelector('#step-model-status');
+      const modelBody = root.querySelector('#step-model-body');
+      const artifactStep = root.querySelector('#step-first-artifact');
+      const watchStep = root.querySelector('#step-watch-artifact');
+      const watchStatus = root.querySelector('#step-watch-artifact-status');
+
+      if (activation.hasModel || milestones.modelReadyAt) {
+        modelStep?.classList.add('done');
+        if (modelStatus) modelStatus.textContent = 'Done';
+        modelBody?.classList.add('ui-hidden');
+        artifactStep?.classList.remove('disabled');
+      }
+
+      if (milestones.firstRecordingStartedAt) {
+        artifactStep?.classList.remove('disabled');
+      }
+
+      if (milestones.firstArtifactSavedAt) {
+        artifactStep?.classList.add('done');
+        watchStep?.classList.remove('disabled');
+        watchStep?.classList.add('done');
+        if (watchStatus) watchStatus.textContent = 'Saved';
+      } else if (activation.phase === 'processing-first-artifact' || activation.phase === 'recording-first-artifact') {
+        watchStep?.classList.remove('disabled');
+        if (watchStatus) {
+          watchStatus.textContent = activation.phase === 'processing-first-artifact' ? 'Processing...' : 'Recording...';
+        }
       }
     }
 
@@ -4174,6 +4398,11 @@
         const status = await invoke('cmd_status');
         const wasRecording = isRecording;
         const wasProcessing = isProcessing;
+        activationState = status.activation || activationState;
+        const onboardingRoot = meetingsScroll.querySelector('.onboarding-content');
+        if (onboardingRoot && activationState) {
+          applyActivationState(onboardingRoot, activationState);
+        }
         const mode = status.recordingMode || 'meeting';
         isRecording = status.recording;
         isProcessing = !!status.processing;
@@ -4355,6 +4584,9 @@
       document.getElementById('btn-open-output').textContent = isCapture ? 'Open Capture' : 'Open Meeting';
       if (draftButton) {
         draftButton.style.display = notice.kind === 'saved' ? '' : 'none';
+      }
+      if (notice.kind === 'saved') {
+        markActivationNudgeShown('saved-artifact-draft');
       }
     }
 
@@ -4976,6 +5208,7 @@
       detailOverlay.classList.remove('active');
       currentMeetingPath = null;
       currentMeetingDetail = null;
+      persistRecallWorkspaceState({ currentMeetingPath: '' });
       if (detailFeedbackTimer) {
         clearTimeout(detailFeedbackTimer);
         detailFeedbackTimer = null;
@@ -5173,6 +5406,153 @@
         detailScroll.appendChild(decCard);
       }
 
+      if (detail.related_people && detail.related_people.length > 0) {
+        const peopleCard = document.createElement('div');
+        peopleCard.className = 'detail-context';
+        const peopleLabel = document.createElement('div');
+        peopleLabel.className = 'detail-context-label';
+        peopleLabel.textContent = 'Related People';
+        const peopleRow = document.createElement('div');
+        peopleRow.className = 'detail-chip-row';
+        for (const person of detail.related_people) {
+          const btn = document.createElement('button');
+          btn.className = 'detail-chip-btn';
+          btn.textContent = person;
+          btn.addEventListener('click', () => {
+            searchInput.value = person;
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          peopleRow.appendChild(btn);
+        }
+        peopleCard.appendChild(peopleLabel);
+        peopleCard.appendChild(peopleRow);
+        detailScroll.appendChild(peopleCard);
+      }
+
+      if (detail.related_topics && detail.related_topics.length > 0) {
+        const topicsCard = document.createElement('div');
+        topicsCard.className = 'detail-context';
+        const topicsLabel = document.createElement('div');
+        topicsLabel.className = 'detail-context-label';
+        topicsLabel.textContent = 'Related Topics';
+        const topicsRow = document.createElement('div');
+        topicsRow.className = 'detail-chip-row';
+        for (const topic of detail.related_topics) {
+          const btn = document.createElement('button');
+          btn.className = 'detail-chip-btn';
+          btn.textContent = topic;
+          btn.addEventListener('click', () => {
+            searchInput.value = topic;
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          topicsRow.appendChild(btn);
+        }
+        topicsCard.appendChild(topicsLabel);
+        topicsCard.appendChild(topicsRow);
+        detailScroll.appendChild(topicsCard);
+      }
+
+      if (detail.related_commitments && detail.related_commitments.length > 0) {
+        const commitmentsCard = document.createElement('div');
+        commitmentsCard.className = 'detail-context';
+        const commitmentsLabel = document.createElement('div');
+        commitmentsLabel.className = 'detail-context-label';
+        commitmentsLabel.textContent = 'Open Commitments';
+        const commitmentsList = document.createElement('div');
+        commitmentsList.className = 'detail-action-list';
+        for (const item of detail.related_commitments) {
+          const row = document.createElement('div');
+          row.className = 'detail-action-item';
+          const textSpan = document.createElement('span');
+          textSpan.className = 'detail-action-text';
+          const owner = item.who ? `${item.who}: ` : '';
+          const due = item.by_date ? ` · ${item.by_date}` : '';
+          setHighlightedText(textSpan, `${owner}${item.what}${due}`, activeSearchQuery);
+          row.appendChild(textSpan);
+
+          const openBtn = document.createElement('button');
+          openBtn.className = 'btn btn-secondary btn-sm';
+          openBtn.textContent = 'Source';
+          openBtn.addEventListener('click', () => openMeetingDetail(item.path));
+          row.appendChild(openBtn);
+
+          commitmentsList.appendChild(row);
+        }
+        commitmentsCard.appendChild(commitmentsLabel);
+        commitmentsCard.appendChild(commitmentsList);
+        detailScroll.appendChild(commitmentsCard);
+      }
+
+      if (detail.related_meetings && detail.related_meetings.length > 0) {
+        const meetingsCard = document.createElement('div');
+        meetingsCard.className = 'detail-context';
+        const meetingsLabel = document.createElement('div');
+        meetingsLabel.className = 'detail-context-label';
+        meetingsLabel.textContent = 'Nearby Meetings';
+        const meetingsList = document.createElement('div');
+        meetingsList.className = 'detail-action-list';
+        for (const meeting of detail.related_meetings) {
+          const row = document.createElement('div');
+          row.className = 'detail-action-item';
+          const textSpan = document.createElement('span');
+          textSpan.className = 'detail-action-text';
+          setHighlightedText(textSpan, `${meeting.title} · ${formatDetailDate(meeting.date)}`, activeSearchQuery);
+          row.appendChild(textSpan);
+
+          const openBtn = document.createElement('button');
+          openBtn.className = 'btn btn-secondary btn-sm';
+          openBtn.textContent = 'Open';
+          openBtn.addEventListener('click', () => openMeetingDetail(meeting.path));
+          row.appendChild(openBtn);
+
+          meetingsList.appendChild(row);
+        }
+        meetingsCard.appendChild(meetingsLabel);
+        meetingsCard.appendChild(meetingsList);
+        detailScroll.appendChild(meetingsCard);
+      }
+
+      if (detail.adjacent_artifacts && detail.adjacent_artifacts.length > 0) {
+        const artifactsCard = document.createElement('div');
+        artifactsCard.className = 'detail-context';
+        const artifactsLabel = document.createElement('div');
+        artifactsLabel.className = 'detail-context-label';
+        artifactsLabel.textContent = 'Adjacent Artifacts';
+        const artifactsList = document.createElement('div');
+        artifactsList.className = 'detail-action-list';
+        for (const artifact of detail.adjacent_artifacts) {
+          const row = document.createElement('div');
+          row.className = 'detail-action-item';
+          const textSpan = document.createElement('span');
+          textSpan.className = 'detail-action-text';
+          const review = artifact.review_available ? ' · review ready' : '';
+          setHighlightedText(textSpan, `${artifact.filename} · ${artifact.kind}${review}`, activeSearchQuery);
+          row.appendChild(textSpan);
+
+          const openBtn = document.createElement('button');
+          openBtn.className = 'btn btn-secondary btn-sm';
+          openBtn.textContent = 'Open';
+          openBtn.addEventListener('click', async () => {
+            try {
+              const access = await invoke('cmd_get_text_file_access', { path: artifact.path });
+              const content = await invoke('cmd_read_text_file', { path: artifact.path });
+              await showMdViewer(artifact.path, artifact.filename, content, {
+                editable: !!access.editable,
+                kind: access.kind || artifact.kind || 'text',
+              });
+            } catch (e) {
+              console.error('Open adjacent artifact:', e);
+            }
+          });
+          row.appendChild(openBtn);
+
+          artifactsList.appendChild(row);
+        }
+        artifactsCard.appendChild(artifactsLabel);
+        artifactsCard.appendChild(artifactsList);
+        detailScroll.appendChild(artifactsCard);
+      }
+
       if (!detail.sections || detail.sections.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'detail-empty';
@@ -5214,6 +5594,7 @@
       detailScroll.appendChild(bottomCta);
 
       detailOverlay.classList.add('active');
+      persistRecallWorkspaceState({ currentMeetingPath: detail.path });
     }
 
     async function openMeetingDetail(path) {
@@ -5228,6 +5609,7 @@
 
     function renderMeetings(meetings) {
       meetingsScroll.replaceChildren();
+      appendProactiveContextCard();
 
       if (!meetings || meetings.length === 0) {
         footer.classList.add('footer-hidden');
@@ -5312,6 +5694,7 @@
 
     async function loadMeetings() {
       try {
+        await loadProactiveContextBundle();
         const meetings = await invoke('cmd_list_meetings', { limit: 30 });
         renderMeetings(meetings);
       } catch (e) {
@@ -5348,6 +5731,7 @@
     async function checkSetup() {
       try {
         currentSetup = await invoke('cmd_needs_setup');
+        activationState = currentSetup.activation || activationState;
         loadMeetings();
       } catch (e) {
         console.error('Setup check:', e);
@@ -5355,13 +5739,7 @@
     }
 
     function setupOnboarding(root) {
-      const hasModel = !!currentSetup?.hasModel;
-      if (hasModel) {
-        root.querySelector('#step-model').classList.add('done');
-        root.querySelector('#step-model-status').textContent = 'Done';
-        root.querySelector('#step-model-body').classList.add('ui-hidden');
-        root.querySelector('#step-first-artifact').classList.remove('disabled');
-      }
+      applyActivationState(root, currentSetup?.activation || activationState);
 
       root.querySelectorAll('.model-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -5393,7 +5771,8 @@
             root.querySelector('#step-model-body').classList.add('ui-hidden');
 
             currentSetup = { ...currentSetup, hasModel: true, needsSetup: false };
-            root.querySelector('#step-first-artifact').classList.remove('disabled');
+            activationState = { ...(activationState || {}), ...(currentSetup?.activation || {}), hasModel: true };
+            applyActivationState(root, currentSetup?.activation || activationState);
           } catch (e) {
             clearInterval(progressTimer);
             fill.style.width = '0%';
@@ -5444,16 +5823,18 @@
               <div class="step-header">
                 <span class="step-num">2</span>
                 <span class="step-title">Create your first artifact</span>
+                <span class="step-status" id="step-first-artifact-status"></span>
               </div>
               <div class="step-body">
                 <p>Make a quick 10-second test recording. Say one sentence, stop, and let Minutes save its first markdown artifact.</p>
                 <button class="btn btn-primary" id="btn-start-first-recording">Record a 10-second test</button>
               </div>
             </div>
-            <div class="onboarding-step disabled">
+            <div class="onboarding-step disabled" id="step-watch-artifact">
               <div class="step-header">
                 <span class="step-num">3</span>
                 <span class="step-title">Watch it appear here</span>
+                <span class="step-status" id="step-watch-artifact-status"></span>
               </div>
               <div class="step-body">
                 <p>As soon as the test recording finishes processing, this setup card disappears and your first saved artifact takes its place.</p>
@@ -5463,6 +5844,7 @@
         </div>`;
       meetingsScroll.appendChild(empty);
       setupOnboarding(empty);
+      markActivationNudgeShown('first-run-onboarding');
     }
 
     // ── Upcoming meetings ──
@@ -6688,8 +7070,11 @@
     const recallLoading = document.getElementById('recall-loading');
     const recallNote = document.getElementById('recall-note');
     const recallNoteInput = document.getElementById('recall-note-input');
+    const recallWeeklyView = document.getElementById('recall-weekly-view');
+    const recallWeeklyContent = document.getElementById('recall-weekly-content');
     const recallExitBanner = document.getElementById('recall-exit-banner');
     const recallNudge = document.getElementById('recall-nudge');
+    const recallWeeklyBtn = document.getElementById('btn-recall-weekly');
     const recallEndBtn = document.getElementById('btn-recall-end');
     const assistantBtn = document.getElementById('btn-assistant');
     const splitHandle = document.getElementById('split-handle');
@@ -6742,6 +7127,7 @@
         const panelW = recallPanel.offsetWidth;
         const ratio = panelW / bodyW;
         localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
+        persistRecallWorkspaceState({ recallRatio: ratio });
         if (recallFitAddon) recallFitAddon.fit();
       };
       document.addEventListener('mousemove', onMove);
@@ -6751,13 +7137,14 @@
     splitHandle.addEventListener('dblclick', () => {
       localStorage.setItem('minutes.recallRatio', '0.500');
       applyRecallRatio(0.5);
+      persistRecallWorkspaceState({ recallRatio: 0.5 });
       if (recallFitAddon) recallFitAddon.fit();
     });
 
     // ── Phase management ──
     function setRecallPhase(phase, context) {
       recallPhase = phase;
-      const dotClasses = ['prep', 'listening', 'debrief'];
+      const dotClasses = ['prep', 'listening', 'debrief', 'weekly'];
       recallDot.classList.remove(...dotClasses);
       recallPhaseLabel.classList.remove(...dotClasses);
       if (phase !== 'recall') {
@@ -6765,12 +7152,34 @@
         recallPhaseLabel.classList.add(phase);
       }
       const labels = { recall: 'Recall', prep: 'Prep', listening: 'Listening', debrief: 'Debrief' };
+      if (phase === 'weekly') {
+        labels.weekly = 'Weekly';
+      }
       recallPhaseLabel.textContent = labels[phase] || 'Recall';
       recallContextLabel.textContent = context ? `\u2014 ${context}` : '';
       recallDot.setAttribute('aria-label', 'Phase: ' + (labels[phase] || 'Recall'));
 
+      recallWeeklyView.classList.toggle('active', phase === 'weekly');
+      if (phase === 'weekly') {
+        recallLoading.classList.remove('active');
+      }
+      recallTerminalContainer.classList.toggle('hidden', phase === 'weekly');
       recallTerminalContainer.classList.toggle('dimmed', phase === 'listening');
       recallNote.classList.toggle('active', phase === 'listening');
+      persistRecallWorkspaceState({ recallPhase: phase });
+    }
+
+    async function openWeeklyPhase() {
+      await expandRecallPanel();
+      setRecallPhase('weekly', 'Last 7 days');
+      recallWeeklyContent.textContent = 'Loading weekly summary…';
+      try {
+        const summary = await invoke('cmd_weekly_summary');
+        recallWeeklyContent.textContent = summary.markdown || 'No weekly summary available.';
+      } catch (e) {
+        console.error('Weekly summary:', e);
+        recallWeeklyContent.textContent = `Could not load weekly summary: ${e}`;
+      }
     }
 
     // ── xterm.js initialization ──
@@ -6892,6 +7301,7 @@
       expandAnimating = false;
 
       localStorage.setItem('minutes.recallExpanded', 'true');
+      persistRecallWorkspaceState({ recallExpanded: true });
 
       initRecallTerminal();
       await registerPtyListeners();
@@ -6921,6 +7331,7 @@
         recallExpanded = false;
         expandAnimating = false;
         localStorage.setItem('minutes.recallExpanded', 'false');
+        persistRecallWorkspaceState({ recallExpanded: false });
       }, 120);
     }
 
@@ -6952,6 +7363,14 @@
         await invoke('cmd_spawn_terminal', opts);
         recallPtyAlive = true;
         recallEndBtn.classList.add('active');
+        if (mode === 'assistant' && !meetingPath) {
+          try {
+            const bundle = await invoke('cmd_proactive_context_bundle');
+            recallContextLabel.textContent = bundle.summary ? `\u2014 ${bundle.summary}` : '';
+          } catch (contextError) {
+            console.error('Recall proactive context:', contextError);
+          }
+        }
       } catch (e) {
         const msg = typeof e === 'string' ? e : String(e);
         if (msg.includes('already running') || msg.includes('Already')) {
@@ -7168,6 +7587,9 @@
 
     // ── Button handlers ──
     assistantBtn.addEventListener('click', () => toggleRecallPanel());
+    recallWeeklyBtn.addEventListener('click', () => {
+      openWeeklyPhase();
+    });
 
     document.getElementById('btn-recall-close').addEventListener('click', () => {
       userExplicitlyCollapsed = true;
@@ -7293,6 +7715,7 @@
     const mdViewerReviewBtn = document.getElementById('md-viewer-review-btn');
     const mdViewerRevertBtn = document.getElementById('md-viewer-revert-btn');
     const mdViewerStatus = document.getElementById('md-viewer-status');
+    const mdViewerHistory = document.getElementById('md-viewer-history');
     const mdViewerReview = document.getElementById('md-viewer-review');
     const mdViewerReviewMeta = document.getElementById('md-viewer-review-meta');
     const mdViewerReviewBefore = document.getElementById('md-viewer-review-before');
@@ -7314,6 +7737,106 @@
     let openArtifactParseError = null;
     let mdViewerReviewVisible = false;
     let mdViewerReviewData = null;
+    let recallWorkspaceState = null;
+
+    function formatArtifactOpenedAt(isoString) {
+      if (!isoString) return '';
+      const date = new Date(isoString);
+      if (!Number.isFinite(date.getTime())) return '';
+      return date.toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+
+    async function loadRecentArtifacts(activePath = openArtifactPath) {
+      if (!mdViewerHistory) return;
+      let items = [];
+      try {
+        items = await invoke('cmd_recent_artifacts', { limit: 8 });
+      } catch (e) {
+        console.error('Recent artifacts:', e);
+      }
+      mdViewerHistory.replaceChildren();
+      if (!Array.isArray(items) || !items.length) {
+        mdViewerHistory.classList.remove('active');
+        return;
+      }
+      mdViewerHistory.classList.add('active');
+      for (const item of items) {
+        const card = document.createElement('div');
+        card.className = 'md-viewer-history-item';
+        if (activePath && item.path === activePath) {
+          card.classList.add('active');
+        }
+
+        const title = document.createElement('div');
+        title.className = 'md-viewer-history-title';
+        title.textContent = item.filename || item.path;
+
+        const meta = document.createElement('div');
+        meta.className = 'md-viewer-history-meta';
+        const chips = [
+          (item.kind || '').toUpperCase(),
+          item.editable ? 'editable' : 'read-only',
+          item.reviewAvailable ? 'review ready' : null,
+          formatArtifactOpenedAt(item.openedAt),
+        ].filter(Boolean);
+        meta.textContent = chips.join(' · ');
+
+        const openBtn = document.createElement('button');
+        openBtn.className = 'btn btn-secondary btn-sm md-viewer-history-open';
+        openBtn.textContent = item.path === activePath ? 'Open again' : 'Open';
+        openBtn.addEventListener('click', async () => {
+          try {
+            const access = await invoke('cmd_get_text_file_access', { path: item.path });
+            const content = await invoke('cmd_read_text_file', { path: item.path });
+            await showMdViewer(
+              item.path,
+              item.filename || item.path.split(/[\\/]/).pop() || item.path,
+              content,
+              {
+                editable: !!access.editable,
+                kind: access.kind || item.kind || 'text',
+              },
+            );
+          } catch (e) {
+            console.error('Open recent artifact:', e);
+            setMdViewerStatus('Could not reopen artifact', 'warning');
+          }
+        });
+
+        card.appendChild(title);
+        card.appendChild(meta);
+        card.appendChild(openBtn);
+        mdViewerHistory.appendChild(card);
+      }
+    }
+
+    async function persistRecallWorkspaceState(patch = {}) {
+      recallWorkspaceState = {
+        recallExpanded,
+        recallPhase,
+        recallRatio: getStoredRecallRatio(),
+        currentMeetingPath: currentMeetingPath || '',
+        openArtifactPath: openArtifactPath || '',
+        ...(recallWorkspaceState || {}),
+        ...patch,
+      };
+      try {
+        await invoke('cmd_set_recall_workspace_state', {
+          recallExpanded: recallWorkspaceState.recallExpanded,
+          recallPhase: recallWorkspaceState.recallPhase,
+          recallRatio: recallWorkspaceState.recallRatio,
+          currentMeetingPath: recallWorkspaceState.currentMeetingPath,
+          openArtifactPath: recallWorkspaceState.openArtifactPath,
+        });
+      } catch (e) {
+        console.error('Persist recall workspace state:', e);
+      }
+    }
 
     marked.setOptions({ breaks: true });
 
@@ -7679,6 +8202,8 @@
       } catch (e) {
         console.error('Set open artifact:', e);
       }
+      await persistRecallWorkspaceState({ openArtifactPath: path });
+      await loadRecentArtifacts(path);
       await refreshArtifactReview();
       return true;
     }
@@ -7707,12 +8232,17 @@
       mdViewerContent.textContent = '';
       mdViewerEditor.value = '';
       openArtifactEditable = false;
+      if (mdViewerHistory) {
+        mdViewerHistory.replaceChildren();
+        mdViewerHistory.classList.remove('active');
+      }
       refreshMdViewerChrome();
       try {
         await invoke('cmd_clear_open_artifact');
       } catch (e) {
         console.error('Clear open artifact:', e);
       }
+      await persistRecallWorkspaceState({ openArtifactPath: '' });
     }
 
     function closeArtifactTemplatePicker(result = null) {
@@ -7913,9 +8443,55 @@
     setInterval(checkUpcoming, 60000);
 
     // Restore panel state from previous session
-    if (localStorage.getItem('minutes.recallExpanded') === 'true') {
-      setTimeout(() => openRecall('assistant'), 500);
-    }
+    (async () => {
+      try {
+        recallWorkspaceState = await invoke('cmd_get_recall_workspace_state');
+      } catch (e) {
+        console.error('Load recall workspace state:', e);
+        recallWorkspaceState = null;
+      }
+      if (!recallWorkspaceState) {
+        if (localStorage.getItem('minutes.recallExpanded') === 'true') {
+          setTimeout(() => openRecall('assistant'), 500);
+        }
+        return;
+      }
+
+      if (typeof recallWorkspaceState.recallRatio === 'number') {
+        localStorage.setItem('minutes.recallRatio', Number(recallWorkspaceState.recallRatio).toFixed(3));
+      }
+
+      if (recallWorkspaceState.recallExpanded) {
+        setTimeout(async () => {
+          await openRecall('assistant');
+          if (recallWorkspaceState.recallPhase) {
+            setRecallPhase(recallWorkspaceState.recallPhase, null);
+          }
+        }, 500);
+      }
+
+      if (recallWorkspaceState.openArtifactPath) {
+        setTimeout(async () => {
+          try {
+            const access = await invoke('cmd_get_text_file_access', { path: recallWorkspaceState.openArtifactPath });
+            const content = await invoke('cmd_read_text_file', { path: recallWorkspaceState.openArtifactPath });
+            const filename = recallWorkspaceState.openArtifactPath.split(/[\\/]/).pop() || recallWorkspaceState.openArtifactPath;
+            await showMdViewer(recallWorkspaceState.openArtifactPath, filename, content, {
+              editable: !!access.editable,
+              kind: access.kind || 'text',
+            });
+          } catch (e) {
+            console.error('Restore open artifact:', e);
+          }
+        }, 650);
+      } else if (recallWorkspaceState.currentMeetingPath) {
+        setTimeout(() => {
+          openMeetingDetail(recallWorkspaceState.currentMeetingPath).catch((e) => {
+            console.error('Restore meeting detail:', e);
+          });
+        }, 650);
+      }
+    })();
   </script>
 </body>
 </html>

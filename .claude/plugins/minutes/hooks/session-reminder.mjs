@@ -34,10 +34,14 @@ import { homedir } from "os";
 import {
   finalizePendingMeetingPrepNudge,
   getLatestLearning,
-  inferMeetingPrepModeFromUsage,
   recordPendingMeetingPrepNudge,
+  recommendNextAction,
   shouldSuppressMeetingPrepNudge,
 } from "./lib/minutes-learn.mjs";
+import {
+  buildProactiveContextBundle,
+  proactiveContextAdditionalText,
+} from "./lib/proactive-context.mjs";
 
 // Only run on startup, not resume/compact/clear
 const input = JSON.parse(process.argv[2] || "{}");
@@ -80,94 +84,8 @@ if (existsSync(configPath)) {
   }
 }
 
-// Scan for recent voice memos (last 3 days, max 5)
-let memoContext = "";
-try {
-  const memosDir = join(homedir(), "meetings", "memos");
-  if (existsSync(memosDir)) {
-    const { readdirSync, statSync } = await import("fs");
-    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000; // 3 days
-    const files = readdirSync(memosDir)
-      .filter((f) => f.endsWith(".md"))
-      .map((f) => {
-        const full = join(memosDir, f);
-        const mtime = statSync(full).mtimeMs;
-        return { name: f, path: full, mtime };
-      })
-      .filter((f) => f.mtime >= cutoff)
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 5);
-
-    if (files.length > 0) {
-      const memoLines = files.map((f) => {
-        // Extract title from frontmatter (first line after ---)
-        try {
-          const content = readFileSync(f.path, "utf-8");
-          const titleMatch = content.match(/^title:\s*(.+)$/m);
-          const dateMatch = content.match(/^date:\s*(.+)$/m);
-          const title = titleMatch ? titleMatch[1].trim() : f.name.replace(".md", "");
-          const date = dateMatch
-            ? new Date(dateMatch[1].trim()).toLocaleDateString("en-US", { month: "short", day: "numeric" })
-            : "recent";
-          return `[${date}] ${title}`;
-        } catch {
-          return f.name.replace(".md", "");
-        }
-      });
-      memoContext = `\n\nRecent voice memos: ${memoLines.join(", ")}. The user may ask about these — use search_meetings or get_meeting MCP tools to retrieve details.`;
-    }
-  }
-} catch {
-  // Non-fatal — skip voice memo scan
-}
-
-// Scan relationship graph for proactive intelligence (from SQLite index)
-let relationshipContext = "";
-try {
-  const { execFileSync } = await import("child_process");
-  const minutesBin = join(homedir(), ".local", "bin", "minutes");
-  if (existsSync(minutesBin)) {
-    // Get people data (auto-rebuilds if needed)
-    const peopleRaw = execFileSync(minutesBin, ["people", "--json", "--limit", "10"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    });
-    const people = JSON.parse(peopleRaw);
-
-    if (Array.isArray(people) && people.length > 0) {
-      // Losing touch alerts
-      const losingTouch = people.filter((p) => p.losing_touch);
-      if (losingTouch.length > 0) {
-        const alerts = losingTouch
-          .slice(0, 3)
-          .map((p) => `${p.name} (${p.meeting_count} meetings, last ${Math.round(p.days_since)}d ago)`)
-          .join(", ");
-        relationshipContext += `\n\nLosing touch: ${alerts}. Consider reaching out.`;
-      }
-
-      // Stale commitments
-      try {
-        const commitsRaw = execFileSync(minutesBin, ["commitments", "--json"], {
-          encoding: "utf-8",
-          timeout: 3000,
-        });
-        const commitments = JSON.parse(commitsRaw);
-        const stale = Array.isArray(commitments) ? commitments.filter((c) => c.status === "stale") : [];
-        if (stale.length > 0) {
-          const staleList = stale
-            .slice(0, 3)
-            .map((c) => `"${c.text}" for ${c.person_name || "unknown"}`)
-            .join("; ");
-          relationshipContext += `\n\nStale commitments (overdue): ${staleList}. Mention if relevant to today's work.`;
-        }
-      } catch {
-        // Non-fatal
-      }
-    }
-  }
-} catch {
-  // Non-fatal — relationship graph not available or not yet built
-}
+const proactiveBundle = await buildProactiveContextBundle(homedir());
+const proactiveContext = proactiveContextAdditionalText(proactiveBundle);
 
 // ─── Plugin update check ──────────────────────────────────────────────
 // Adapted from garrytan/gstack's bin/gstack-update-check pattern. Fetches
@@ -390,13 +308,8 @@ If the user ignores the update mention and stays on task, do not bring it up aga
 let calendarContext = "";
 let localCheckResolved = false;
 finalizePendingMeetingPrepNudge();
-const learnedPrepMode =
-  getLatestLearning("workflow_preference", "meeting_prep_mode")?.value || "auto";
 const learnedNudgeMode =
   getLatestLearning("nudge_feedback", "meeting_prep_nudge")?.value || "active";
-const observedPrepMode = inferMeetingPrepModeFromUsage();
-const effectivePrepMode =
-  learnedPrepMode !== "auto" ? learnedPrepMode : observedPrepMode;
 const shouldSuppressNudge =
   learnedNudgeMode === "suppress" || shouldSuppressMeetingPrepNudge();
 try {
@@ -423,16 +336,40 @@ try {
     timeout: 2000,
     stdio: ["ignore", "pipe", "ignore"], // swallow stderr
   }).trim();
+  const upcomingMinutes = raw
+    .split(/,\s*/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split("|");
+      const start = parts[1] ? new Date(parts[1]) : null;
+      if (!start || Number.isNaN(start.getTime())) return null;
+      return Math.max(0, Math.round((start.getTime() - Date.now()) / 60000));
+    })
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)[0];
   localCheckResolved = true; // osascript ran cleanly — trust its answer
   if (raw && raw.length > 0 && !raw.toLowerCase().startsWith("error")) {
     if (!shouldSuppressNudge) {
-      calendarContext =
-        effectivePrepMode === "prep"
-          ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-prep in ONE line — the user consistently uses the deeper prep flow.`
-          : effectivePrepMode === "brief"
-            ? `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief in ONE line — the user consistently uses the fast brief flow.`
-            : `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief (fast, no questions) or /minutes-prep (interactive goal-setting) to the user in ONE line. Prefer brief if the meeting is <20 min away.`;
-      recordPendingMeetingPrepNudge(effectivePrepMode);
+      const recommendationOptions = {
+        meetingInNextHour: true,
+        hasModel: true,
+        hasArtifact: true,
+        suppressMeetingPrep: false,
+      };
+      if (Number.isFinite(upcomingMinutes)) {
+        recommendationOptions.minutesUntilMeeting = upcomingMinutes;
+      }
+      const recommendation = recommendNextAction("startup", recommendationOptions);
+      if (recommendation.action === "/minutes-prep") {
+        calendarContext =
+          `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-prep in ONE line — the learned next-best action prefers the deeper prep flow here.`;
+        recordPendingMeetingPrepNudge("prep");
+      } else {
+        calendarContext =
+          `\n\nUpcoming meeting in the next 60 min detected locally. Recommend /minutes-brief in ONE line — the learned next-best action prefers the fast brief flow here.`;
+        recordPendingMeetingPrepNudge("brief");
+      }
     }
   }
   // Empty raw with localCheckResolved=true → no meetings → no injection. Zero cost.
@@ -446,18 +383,26 @@ if (!localCheckResolved) {
   // This is the graceful fallback for non-Mac users and users without
   // Calendar.app running. One short sentence — minimal context cost.
   if (!shouldSuppressNudge) {
-    calendarContext =
-      effectivePrepMode === "prep"
-        ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-prep in ONE line — the user consistently uses the deeper prep flow. Otherwise stay silent.`
-        : effectivePrepMode === "brief"
-          ? `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief in ONE line — the user consistently uses the fast brief flow. Otherwise stay silent.`
-          : `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief (fast) or /minutes-prep (goal-setting) in ONE line. Otherwise stay silent.`;
-    recordPendingMeetingPrepNudge(effectivePrepMode);
+    const recommendation = recommendNextAction("startup", {
+      meetingInNextHour: true,
+      hasModel: true,
+      hasArtifact: true,
+      suppressMeetingPrep: false,
+    });
+    if (recommendation.action === "/minutes-prep") {
+      calendarContext =
+        `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-prep in ONE line — the learned next-best action prefers the deeper prep flow here. Otherwise stay silent.`;
+      recordPendingMeetingPrepNudge("prep");
+    } else {
+      calendarContext =
+        `\n\nIf gcal_list_events MCP is available and the user has a meeting in the next 60 min, recommend /minutes-brief in ONE line — the learned next-best action prefers the fast brief flow here. Otherwise stay silent.`;
+      recordPendingMeetingPrepNudge("brief");
+    }
   }
 }
 
 const output = {
-  additionalContext: `Active Minutes user.${calendarContext}${memoContext}${relationshipContext}${updateContext}`,
+  additionalContext: `Active Minutes user.${calendarContext}${proactiveContext}${updateContext}`,
 };
 
 console.log(JSON.stringify(output));

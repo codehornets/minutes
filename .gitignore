@@ -49,3 +49,4 @@ minutes.mcpb
 .gstack/
 tauri/src-tauri/bin/system_audio_record
 tauri/src-tauri/bin/system_audio_record-*
+.vercel

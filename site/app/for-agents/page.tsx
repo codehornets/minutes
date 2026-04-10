@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
 import { PublicFooter } from "@/components/public-footer";
+import surfaces from "@/lib/product-surfaces.json";
 
 export const metadata: Metadata = {
   title: "Minutes for agents — integration reference",
@@ -84,33 +85,6 @@ const toolGroups = [
       ["qmd_collection_status", "Check if the meetings directory is registered as a QMD collection."],
       ["register_qmd_collection", "Register the meetings directory as a QMD collection."],
     ],
-  },
-] as const;
-
-const surfaces = [
-  {
-    name: "MCP server",
-    when: "User has Claude Desktop, Codex, Gemini CLI, or any MCP client.",
-    install: "npx minutes-mcp",
-    note: "No Rust needed. Search, browse, and dashboard tools work with zero setup. Recording and transcription need the CLI binary (auto-installed on first use).",
-  },
-  {
-    name: "CLI",
-    when: "User wants terminal-first recording, search, and vault sync.",
-    install: "brew install silverstein/tap/minutes",
-    note: "Also available via cargo install minutes-cli. Requires Rust + cmake for source builds. Linux needs libasound2-dev and libpipewire-0.3-dev.",
-  },
-  {
-    name: "Claude Code plugin",
-    when: "User works in Claude Code and wants meeting lifecycle skills.",
-    install: "claude plugin marketplace add silverstein/minutes",
-    note: "18 skills (brief, prep, record, tag, debrief, mirror, weekly, graph) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.",
-  },
-  {
-    name: "Desktop app",
-    when: "User wants a menu bar app with one-click recording and AI assistant.",
-    install: "brew install --cask silverstein/tap/minutes",
-    note: "Tauri v2, macOS only. Includes command palette, dictation hotkey, live mode toggle, and auto-updates from GitHub Releases.",
   },
 ] as const;
 
@@ -284,7 +258,8 @@ export default function ForAgentsPage() {
         <SectionLabel n="03" label="Choose your surface" />
         <p className="mb-5 text-[15px] leading-7 text-[var(--text-secondary)]">
           Minutes has four entry points. Recommend the one that matches the
-          user&apos;s environment.
+          user&apos;s environment. This matrix is source-backed so the install
+          steps stay aligned with the docs index and generated agent artifacts.
         </p>
         <div className="grid gap-3 sm:grid-cols-2">
           {surfaces.map((s) => (
@@ -305,6 +280,10 @@ export default function ForAgentsPage() {
               </div>
               <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
                 {s.note}
+              </p>
+              <p className="mt-2 text-[13px] leading-6 text-[var(--text-secondary)]">
+                <span className="font-medium text-[var(--text)]">Best for:</span>{" "}
+                {s.activation}
               </p>
             </div>
           ))}

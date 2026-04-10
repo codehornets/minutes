@@ -16,6 +16,8 @@ const {
   getLatestLearning,
   getPresentationFocus,
   inferMeetingPrepModeFromUsage,
+  readActivationState,
+  recommendNextAction,
   rememberAlias,
   rememberObserved,
   rememberPresentationFocus,
@@ -97,6 +99,62 @@ try {
   rememberPresentationFocus("debrief", "actions-first", "presentation preference test");
   assert.equal(getPresentationFocus("debrief"), "actions-first");
   assert.equal(getPresentationFocus("weekly"), null);
+
+  // Activation-state-backed first-run recommendation
+  const activationPath = join(agentBase, ".minutes", "activation-state.json");
+  writeFileSync(
+    activationPath,
+    JSON.stringify({
+      hasModel: false,
+      hasSavedArtifact: false,
+      milestones: {},
+    }),
+  );
+  const activation = readActivationState(agentBase);
+  assert.equal(activation.hasModel, false);
+
+  let recommendation = recommendNextAction("no-artifact", { baseDir: agentBase, activation });
+  assert.equal(recommendation.action, "download-model");
+
+  recommendation = recommendNextAction("startup", {
+    baseDir: agentBase,
+    activation: {
+      hasModel: true,
+      hasSavedArtifact: false,
+      milestones: { modelReadyAt: new Date().toISOString() },
+    },
+  });
+  assert.equal(recommendation.action, "start-first-recording");
+
+  recommendation = recommendNextAction("startup", {
+    baseDir: agentBase,
+    meetingInNextHour: true,
+    minutesUntilMeeting: 10,
+    hasModel: true,
+    hasArtifact: true,
+    suppressMeetingPrep: false,
+  });
+  assert.equal(recommendation.action, "/minutes-prep");
+
+  recommendation = recommendNextAction("startup", {
+    baseDir: agentBase,
+    meetingInNextHour: true,
+    minutesUntilMeeting: 10,
+    hasModel: true,
+    hasArtifact: true,
+    suppressMeetingPrep: false,
+    prepMode: "brief",
+  });
+  assert.equal(recommendation.action, "/minutes-brief");
+
+  recommendation = recommendNextAction("after-recording", { baseDir: agentBase });
+  assert.equal(recommendation.action, "/minutes-debrief");
+
+  recommendation = recommendNextAction("recent-memo", {
+    baseDir: agentBase,
+    recentMemoCount: 2,
+  });
+  assert.equal(recommendation.action, "/minutes-ideas");
 
   console.log("minutes-learn tests passed");
 } finally {

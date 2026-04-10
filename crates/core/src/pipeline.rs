@@ -784,6 +784,17 @@ pub fn transcribe_to_artifact(
             ContentType::Dictation => Some("dictation".into()),
         }
     };
+    let tags = derive_structured_tags(
+        content_type,
+        source.as_deref(),
+        context
+            .sidecar
+            .as_ref()
+            .and_then(|sidecar| sidecar.device.as_deref()),
+        &entities,
+        &[],
+        &[],
+    );
 
     let frontmatter = Frontmatter {
         title: auto_title,
@@ -792,7 +803,7 @@ pub fn transcribe_to_artifact(
         duration: estimate_duration(audio_path),
         source,
         status,
-        tags: vec![],
+        tags,
         attendees,
         attendees_raw: None,
         calendar_event: calendar_event_title,
@@ -1332,6 +1343,14 @@ where
             ContentType::Dictation => Some("dictation".into()),
         }
     };
+    let tags = derive_structured_tags(
+        content_type,
+        source.as_deref(),
+        sidecar.and_then(|s| s.device.as_deref()),
+        &entities,
+        &structured_decisions,
+        &structured_intents,
+    );
 
     // Use sidecar captured_at, then audio file creation time, then now() as last resort
     let recording_date = sidecar
@@ -1346,7 +1365,7 @@ where
         duration,
         source,
         status,
-        tags: vec![],
+        tags,
         attendees,
         attendees_raw: None,
         calendar_event: calendar_event_title,
@@ -2018,6 +2037,73 @@ fn build_entity_links(
     }
 }
 
+fn derive_structured_tags(
+    content_type: ContentType,
+    source: Option<&str>,
+    device: Option<&str>,
+    entities: &markdown::EntityLinks,
+    decisions: &[markdown::Decision],
+    intents: &[markdown::Intent],
+) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push_tag = |tag: String| {
+        if seen.insert(tag.clone()) {
+            tags.push(tag);
+        }
+    };
+
+    if content_type == ContentType::Memo {
+        push_tag("memo".to_string());
+
+        if let Some(source) = source.filter(|value| !value.trim().is_empty()) {
+            push_tag(format!(
+                "source:{}",
+                normalize_entity_topic(source).replace(' ', "-")
+            ));
+        }
+
+        if let Some(device) = device.filter(|value| !value.trim().is_empty()) {
+            let normalized = normalize_entity_topic(device).replace(' ', "-");
+            if !normalized.is_empty() {
+                push_tag(format!("device:{normalized}"));
+            }
+        }
+
+        if intents.iter().any(|intent| {
+            matches!(
+                intent.kind,
+                markdown::IntentKind::Commitment | markdown::IntentKind::ActionItem
+            )
+        }) {
+            push_tag("has-actions".into());
+        }
+        if !decisions.is_empty() {
+            push_tag("has-decisions".into());
+        }
+
+        for entity in entities.people.iter().take(3) {
+            push_tag(format!("person:{}", entity.slug));
+        }
+
+        for decision in decisions.iter().take(3) {
+            if let Some(topic) = decision
+                .topic
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                push_tag(format!("topic:{}", slugify(topic)));
+            }
+        }
+
+        for entity in entities.projects.iter().take(4) {
+            push_tag(format!("project:{}", entity.slug));
+        }
+    }
+
+    tags.into_iter().take(8).collect()
+}
+
 fn add_person_entity(entities: &mut BTreeMap<String, (String, BTreeSet<String>)>, raw: &str) {
     let trimmed = raw.trim().trim_start_matches('@').trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unassigned") {
@@ -2628,6 +2714,56 @@ mod tests {
             .projects
             .iter()
             .any(|entity| entity.slug == "advisor-platform"));
+    }
+
+    #[test]
+    fn derive_structured_tags_for_memo_includes_source_people_projects_and_guardrails() {
+        let entities = build_entity_links(
+            "Pricing Idea",
+            Some("pricing review with Alex"),
+            &["Alex Chen".into()],
+            &[],
+            &[markdown::Decision {
+                text: "Use annual billing for premium users".into(),
+                topic: Some("pricing strategy".into()),
+            }],
+            &[markdown::Intent {
+                kind: markdown::IntentKind::Commitment,
+                what: "Send the revised deck".into(),
+                who: Some("Alex Chen".into()),
+                status: "open".into(),
+                by_date: Some("Friday".into()),
+            }],
+            &[],
+        );
+
+        let tags = derive_structured_tags(
+            ContentType::Memo,
+            Some("voice-memos"),
+            Some("iPhone 16 Pro"),
+            &entities,
+            &[markdown::Decision {
+                text: "Use annual billing for premium users".into(),
+                topic: Some("pricing strategy".into()),
+            }],
+            &[markdown::Intent {
+                kind: markdown::IntentKind::Commitment,
+                what: "Send the revised deck".into(),
+                who: Some("Alex Chen".into()),
+                status: "open".into(),
+                by_date: Some("Friday".into()),
+            }],
+        );
+
+        assert!(tags.iter().any(|tag| tag == "memo"));
+        assert!(tags.iter().any(|tag| tag == "source:voice-memos"));
+        assert!(tags.iter().any(|tag| tag == "device:iphone-16-pro"));
+        assert!(tags.iter().any(|tag| tag == "person:alex-chen"));
+        assert!(tags.iter().any(|tag| tag == "project:pricing-idea"));
+        assert!(tags.iter().any(|tag| tag == "topic:pricing-strategy"));
+        assert!(tags.iter().any(|tag| tag == "has-actions"));
+        assert!(tags.iter().any(|tag| tag == "has-decisions"));
+        assert!(tags.len() <= 8);
     }
 
     #[test]

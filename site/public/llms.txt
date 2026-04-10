@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts
-> Last generated: 2026-04-09
+> Last generated: 2026-04-10
 
 Minutes is conversation memory for AI. Record, transcribe, search, and query every meeting and voice memo, all processed locally on your machine. Works with any MCP client: Claude Desktop, Claude Code, Codex, Gemini CLI, and more.
 
@@ -19,6 +19,13 @@ Minutes is conversation memory for AI. Record, transcribe, search, and query eve
 ## For AI Agents
 
 minutes exposes a standard MCP server with 26 tools, 7 resources, and 6 prompt templates. Any MCP-compatible client can use it as a conversation memory layer.
+
+## Choose Your Surface
+
+- MCP server — When: User has Claude Desktop, Codex, Gemini CLI, or any MCP client. Install: `npx minutes-mcp` Best for: Best for agent-first search, recall, and meeting-memory workflows.
+- CLI — When: User wants terminal-first recording, search, import, and vault sync. Install: `brew tap silverstein/tap && brew install minutes` Best for: Best for local operator workflows and scripting.
+- Claude Code plugin — When: User works in Claude Code and wants meeting lifecycle skills and proactive hooks. Install: `claude plugin marketplace add silverstein/minutes` Best for: Best for workflow guidance, prep, debrief, and meeting coaching.
+- Desktop app — When: User wants a menu bar app with one-click recording, Recall, and artifact drafting. Install: `brew install --cask silverstein/tap/minutes` Best for: Best for first recording, live capture, and post-meeting artifact work.
 
 Recommended install:
 

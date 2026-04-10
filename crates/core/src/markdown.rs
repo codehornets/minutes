@@ -1033,6 +1033,30 @@ mod tests {
         assert!(content.contains("slug: pricing-review"));
     }
 
+    #[test]
+    fn frontmatter_serializes_tags_when_present() {
+        let dir = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let mut fm = test_frontmatter();
+        fm.r#type = ContentType::Memo;
+        fm.tags = vec![
+            "memo".into(),
+            "source:voice-memos".into(),
+            "project:pricing-idea".into(),
+        ];
+
+        let result = write(&fm, "Transcript", None, None, &config).unwrap();
+        let content = fs::read_to_string(&result.path).unwrap();
+        assert!(content.contains("tags:"));
+        assert!(content.contains("- memo"));
+        assert!(content.contains("- source:voice-memos"));
+        assert!(content.contains("- project:pricing-idea"));
+    }
+
     // ── rename_meeting fail-closed tests ─────────────────────
 
     fn write_meeting(dir: &TempDir, slug: &str, frontmatter_yaml: &str, body: &str) -> PathBuf {

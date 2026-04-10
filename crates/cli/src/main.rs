@@ -9,6 +9,16 @@ mod dashboard;
 mod demo_data;
 use std::path::{Path, PathBuf};
 
+#[derive(Serialize)]
+struct AutomationRunRecord {
+    kind: String,
+    status: String,
+    output_path: String,
+    delivery_target: Option<String>,
+    delivery_payload_path: Option<String>,
+    generated_at: String,
+}
+
 /// minutes — conversation memory for AI assistants.
 /// Every meeting, every idea, every voice note — searchable by your AI.
 #[derive(Parser)]
@@ -344,6 +354,25 @@ enum Commands {
         /// Collection name to use in QMD
         #[arg(long, default_value = "minutes")]
         collection: String,
+    },
+
+    /// Run a file-backed automation primitive (designed for launchd/cron)
+    Automate {
+        /// Automation kind: weekly-summary or proactive-context
+        #[arg(value_parser = ["weekly-summary", "proactive-context"])]
+        kind: String,
+
+        /// Write markdown output to this file instead of the default automation-runs directory
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Optional draft-only delivery payload to generate beside the markdown artifact
+        #[arg(long, value_parser = ["slack-json", "email-markdown"])]
+        delivery_target: Option<String>,
+
+        /// Output the run record JSON as well
+        #[arg(long)]
+        json: bool,
     },
 
     /// Dictate: speak and get text in your clipboard + daily note
@@ -795,6 +824,12 @@ fn main() -> Result<()> {
             }
         }
         Commands::Qmd { action, collection } => cmd_qmd(&action, &collection, &config),
+        Commands::Automate {
+            kind,
+            output,
+            delivery_target,
+            json,
+        } => cmd_automate(&kind, output, delivery_target.as_deref(), json, &config),
         Commands::Service { action } => {
             #[cfg(target_os = "macos")]
             {
@@ -1321,6 +1356,242 @@ fn cmd_jobs(include_terminal: bool, json_mode: bool, limit: usize) -> Result<()>
         println!("  created: {}", job.created_at.to_rfc3339());
         println!("  audio: {}", job.audio_path);
         println!();
+    }
+
+    Ok(())
+}
+
+fn automation_runs_dir() -> PathBuf {
+    Config::minutes_dir().join("automation-runs")
+}
+
+fn build_weekly_summary_markdown(config: &Config) -> Result<String> {
+    let since = (Local::now() - chrono::Duration::days(7)).to_rfc3339();
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: Some(since),
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+
+    let meetings = minutes_core::search::search("", config, &filters)?;
+    let consistency = minutes_core::search::consistency_report(config, None, 7)?;
+    let open_actions = minutes_core::search::find_open_actions(config, None)?;
+
+    let recent_titles = if meetings.is_empty() {
+        "- No meetings or memos in the last 7 days.".to_string()
+    } else {
+        meetings
+            .iter()
+            .take(6)
+            .map(|meeting| format!("- {} ({})", meeting.title, meeting.date))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let decision_conflicts = if consistency.decision_conflicts.is_empty() {
+        "- No conflicting decision arcs detected.".to_string()
+    } else {
+        consistency
+            .decision_conflicts
+            .iter()
+            .take(5)
+            .map(|conflict| format!("- {} -> {}", conflict.topic, conflict.latest.what))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let stale_commitments = if consistency.stale_commitments.is_empty() {
+        "- No stale commitments detected.".to_string()
+    } else {
+        consistency
+            .stale_commitments
+            .iter()
+            .take(5)
+            .map(|item| {
+                format!(
+                    "- {}{}",
+                    item.entry.what,
+                    item.entry
+                        .who
+                        .as_ref()
+                        .map(|who| format!(" ({who})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let open_actions_block = if open_actions.is_empty() {
+        "- No open action items found.".to_string()
+    } else {
+        open_actions
+            .iter()
+            .take(6)
+            .map(|item| {
+                format!(
+                    "- {}: {}{}",
+                    item.assignee,
+                    item.task,
+                    item.due
+                        .as_ref()
+                        .map(|due| format!(" (due {due})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    Ok(format!(
+        "# Weekly Summary\n\n## Volume\n\n- {} meeting or memo artifact(s) in the last 7 days.\n\n## Recent Meetings\n\n{}\n\n## Decision Arcs\n\n{}\n\n## Stale Commitments\n\n{}\n\n## Open Actions\n\n{}\n",
+        meetings.len(),
+        recent_titles,
+        decision_conflicts,
+        stale_commitments,
+        open_actions_block
+    ))
+}
+
+fn build_proactive_context_markdown(config: &Config) -> Result<String> {
+    let since = (Local::now() - chrono::Duration::days(7)).to_rfc3339();
+    let filters = minutes_core::search::SearchFilters {
+        content_type: None,
+        since: Some(since),
+        attendee: None,
+        intent_kind: None,
+        owner: None,
+        recorded_by: None,
+    };
+    let recent_results = minutes_core::search::search("", config, &filters)?;
+    let recent_meetings = recent_results
+        .iter()
+        .filter(|item| item.content_type != "memo")
+        .take(4)
+        .map(|item| format!("- {} ({})", item.title, item.date))
+        .collect::<Vec<_>>();
+    let recent_memos = recent_results
+        .iter()
+        .filter(|item| item.content_type == "memo")
+        .take(4)
+        .map(|item| format!("- {} ({})", item.title, item.date))
+        .collect::<Vec<_>>();
+    let consistency = minutes_core::search::consistency_report(config, None, 7)?;
+    let stale = consistency
+        .stale_commitments
+        .iter()
+        .take(4)
+        .map(|item| {
+            format!(
+                "- {}{}",
+                item.entry.what,
+                item.entry
+                    .who
+                    .as_ref()
+                    .map(|who| format!(" ({who})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Ok(format!(
+        "# Proactive Context\n\n## Recent Meetings\n\n{}\n\n## Recent Memos\n\n{}\n\n## Stale Commitments\n\n{}\n",
+        if recent_meetings.is_empty() { "- No recent meetings.".to_string() } else { recent_meetings.join("\n") },
+        if recent_memos.is_empty() { "- No recent memos.".to_string() } else { recent_memos.join("\n") },
+        if stale.is_empty() { "- No stale commitments.".to_string() } else { stale.join("\n") },
+    ))
+}
+
+fn build_delivery_payload(
+    kind: &str,
+    target: &str,
+    source_path: &Path,
+    markdown: &str,
+) -> Result<String> {
+    let source = source_path.display().to_string();
+    match target {
+        "slack-json" => Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "delivery_target": "slack-json",
+            "kind": kind,
+            "source_artifact": source,
+            "mode": "draft-only",
+            "text": markdown,
+        }))?),
+        "email-markdown" => Ok(format!(
+            "# Email Draft Payload\n\n- delivery_target: email-markdown\n- kind: {kind}\n- source_artifact: {source}\n- mode: draft-only\n\n## Body\n\n{markdown}"
+        )),
+        other => anyhow::bail!("unsupported delivery target: {}", other),
+    }
+}
+
+fn cmd_automate(
+    kind: &str,
+    output: Option<PathBuf>,
+    delivery_target: Option<&str>,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    let markdown = match kind {
+        "weekly-summary" => build_weekly_summary_markdown(config)?,
+        "proactive-context" => build_proactive_context_markdown(config)?,
+        other => anyhow::bail!("unsupported automation kind: {}", other),
+    };
+
+    let output_path = output.unwrap_or_else(|| {
+        automation_runs_dir().join(format!(
+            "{}-{}.md",
+            Local::now().format("%Y-%m-%d-%H%M%S"),
+            kind
+        ))
+    });
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&output_path, markdown)?;
+
+    let delivery_payload_path = if let Some(target) = delivery_target {
+        let ext = if target == "slack-json" {
+            "delivery.json"
+        } else {
+            "delivery.md"
+        };
+        let payload_path = output_path.with_extension(ext);
+        let payload = build_delivery_payload(
+            kind,
+            target,
+            &output_path,
+            &std::fs::read_to_string(&output_path)?,
+        )?;
+        std::fs::write(&payload_path, payload)?;
+        Some(payload_path)
+    } else {
+        None
+    };
+
+    let record = AutomationRunRecord {
+        kind: kind.to_string(),
+        status: "ok".into(),
+        output_path: output_path.display().to_string(),
+        delivery_target: delivery_target.map(str::to_string),
+        delivery_payload_path: delivery_payload_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        generated_at: Local::now().to_rfc3339(),
+    };
+
+    let run_record_path = output_path.with_extension("json");
+    std::fs::write(&run_record_path, serde_json::to_string_pretty(&record)?)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&record)?);
+    } else {
+        eprintln!("Automation run complete: {}", kind);
+        eprintln!("  markdown: {}", output_path.display());
+        eprintln!("  record: {}", run_record_path.display());
+        if let Some(ref payload_path) = delivery_payload_path {
+            eprintln!("  delivery payload: {}", payload_path.display());
+        }
+        println!("{}", serde_json::to_string_pretty(&record)?);
     }
 
     Ok(())
