@@ -328,6 +328,7 @@ pub(crate) fn resolve_agent_path(cmd: &str) -> String {
     let mut search_dirs: Vec<PathBuf> = vec![
         home.join(".cargo/bin"),
         home.join(".local/bin"),
+        home.join(".opencode/bin"),
         home.join(".npm-global/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
@@ -387,9 +388,20 @@ fn write_agent_prompt_file(
     agent_name: &str,
     prompt: &str,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let mut path = std::env::temp_dir();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let base_dir = home.join(".minutes").join("tmp");
+    std::fs::create_dir_all(&base_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&base_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mut path = base_dir;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| {
@@ -405,7 +417,25 @@ fn write_agent_prompt_file(
         std::process::id(),
         timestamp
     ));
-    std::fs::write(&path, prompt)?;
+    #[cfg(unix)]
+    let mut file = {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?
+    };
+
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+
+    file.write_all(prompt.as_bytes())?;
+    file.flush()?;
     Ok(path)
 }
 
@@ -446,9 +476,9 @@ fn prepare_agent_invocation(
             cmd: agent_cmd.to_string(),
             args: vec![
                 "run".into(),
+                "Follow the attached file exactly and return only the requested output.".into(),
                 "--file".into(),
                 prompt_path.display().to_string(),
-                "Follow the attached file exactly and return only the requested output.".into(),
             ],
             stdin_payload: None,
             cleanup_path: Some(prompt_path),
@@ -531,8 +561,11 @@ fn summarize_with_agent_impl(
             )
         })?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let prompt_bytes = invocation.stdin_payload.clone().unwrap_or_default();
+    if let Some(prompt_bytes) = invocation.stdin_payload.clone() {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Agent stdin unexpectedly unavailable".to_string())?;
         std::thread::spawn(move || {
             stdin.write_all(&prompt_bytes).ok();
         });
@@ -1224,8 +1257,11 @@ fn run_speaker_mapping_via_agent(
             }
             format!("Agent '{}' not found: {}", agent_cmd, e)
         })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let bytes = invocation.stdin_payload.clone().unwrap_or_default();
+    if let Some(bytes) = invocation.stdin_payload.clone() {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Agent stdin unexpectedly unavailable".to_string())?;
         std::thread::spawn(move || {
             stdin.write_all(&bytes).ok();
         });
@@ -1466,5 +1502,42 @@ PARTICIPANTS:
     fn map_speakers_empty_when_no_attendees() {
         let config = Config::default();
         assert!(map_speakers("[SPEAKER_1 0:00] hi", &[], &config).is_empty());
+    }
+
+    #[test]
+    fn prepare_agent_invocation_for_opencode_uses_message_before_file_and_no_stdin() {
+        let invocation = prepare_agent_invocation("opencode", "sensitive prompt").unwrap();
+        assert_eq!(invocation.cmd, "opencode");
+        assert_eq!(invocation.args[0], "run");
+        assert_eq!(
+            invocation.args[1],
+            "Follow the attached file exactly and return only the requested output."
+        );
+        assert_eq!(invocation.args[2], "--file");
+        assert!(invocation.stdin_payload.is_none());
+        let prompt_path = invocation.cleanup_path.expect("prompt path");
+        assert!(prompt_path.starts_with(dirs::home_dir().unwrap().join(".minutes").join("tmp")));
+        let file_contents = std::fs::read_to_string(&prompt_path).unwrap();
+        assert_eq!(file_contents, "sensitive prompt");
+        std::fs::remove_file(prompt_path).unwrap();
+    }
+
+    #[test]
+    fn write_agent_prompt_file_creates_private_minutes_temp_file() {
+        let prompt_path = write_agent_prompt_file("opencode", "top secret").unwrap();
+        assert!(prompt_path.starts_with(dirs::home_dir().unwrap().join(".minutes").join("tmp")));
+        let contents = std::fs::read_to_string(&prompt_path).unwrap();
+        assert_eq!(contents, "top secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&prompt_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        std::fs::remove_file(prompt_path).unwrap();
     }
 }

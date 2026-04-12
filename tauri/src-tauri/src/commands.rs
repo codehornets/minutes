@@ -4855,6 +4855,7 @@ pub fn find_agent_binary(name: &str) -> Option<PathBuf> {
     let mut search_dirs: Vec<PathBuf> = vec![
         home.join(".cargo/bin"),
         home.join(".local/bin"),
+        home.join(".opencode/bin"),
         home.join(".npm-global/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
@@ -5024,7 +5025,7 @@ pub fn cmd_pty_kill(state: tauri::State<AppState>, session_id: String) -> Result
 }
 
 /// Well-known agent CLIs to check for in cmd_list_agents.
-const WELL_KNOWN_AGENTS: &[&str] = &["claude", "codex", "opencode", "bash", "zsh"];
+const WELL_KNOWN_AGENTS: &[&str] = &["claude", "codex", "gemini", "opencode", "bash", "zsh"];
 
 #[tauri::command]
 pub fn cmd_list_agents() -> serde_json::Value {
